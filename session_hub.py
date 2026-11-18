@@ -1,6 +1,7 @@
 import base64
 import os
 import re
+from pathlib import Path
 from threading import Lock
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -13,9 +14,10 @@ app = Flask(__name__, static_folder="session-hub", static_url_path="/assets")
 app.config["MAX_CONTENT_LENGTH"] = 850_000
 actions = Lock()
 broker = Broker()
-managed_environment = "6afe073ca14c525fb5ba9e01"
-base_environment = "6539f6bd7758f8546d5424df"
-base_revision = "6af5100270d68c5d28c8d7ea"
+managed_environment = os.environ.get("SESSION_HUB_WORKSPACE_ENVIRONMENT_ID")
+base_environment = os.environ.get("SESSION_HUB_BASE_ENVIRONMENT_ID") or ""
+base_revision = os.environ.get("SESSION_HUB_BASE_REVISION_ID")
+connector_files = {"session_hub_agent.py", "herdr-workspace.sh"}
 domino_url = os.environ["DOMINO_URL"].rstrip("/")
 project_id = os.environ["DOMINO_PROJECT_ID"]
 owner = os.environ["DOMINO_PROJECT_OWNER"]
@@ -140,7 +142,8 @@ def project_summary(project):
 def supports_connector(environment_config):
     environment = environment_config.get("environment") or {}
     return (
-        environment.get("id") == base_environment and environment.get("revisionId") == base_revision
+        bool(base_environment and base_revision) and environment.get("id") == base_environment
+        and environment.get("revisionId") == base_revision
         and not environment_config.get("clusterConfig") and not environment_config.get("computeClusterConfig")
     )
 
@@ -167,7 +170,7 @@ def workspace_summary(workspace, project):
         "name": workspace["name"], "state": workspace["state"],
         "running": bool(ide), "ide": ide, "ssh": ssh_enabled, "run": execution,
         "tool": next(iter((session.get("config") or config).get("tools") or []), None),
-        "managed": environment.get("id") == managed_environment,
+        "managed": bool(managed_environment) and environment.get("id") == managed_environment,
         "canEnable": can_enable,
         "connector": broker.status(execution),
         "dataPlane": data_plane if workspace.get("dataPlaneId") != "000000000000000000000000" else None,
@@ -215,7 +218,14 @@ def available_tools(pid, environment):
 
 
 def managed_ready():
-    environment = domino(f"/v4/environments/{managed_environment}")
+    if not managed_environment:
+        return False
+    try:
+        environment = domino(f"/v4/environments/{check_id(managed_environment)}")
+    except DominoError as error:
+        if error.status in {403, 404}:
+            return False
+        raise
     return (environment.get("selectedRevision") or {}).get("status") == "Succeeded"
 
 
@@ -357,12 +367,7 @@ def body():
     return data
 
 
-@app.post("/api/connector/register")
-def connector_register():
-    data = body()
-    run = check_id(data.get("run"))
-    pid = check_id(data.get("project"))
-    token = data.get("token")
+def require_connector_owner(token):
     if not isinstance(token, str) or not token or len(token) > 30_000:
         abort(403, "Workspace identity is unavailable.")
     identity = requests.get(f"{domino_url}/api/users/v1/self",
@@ -370,6 +375,23 @@ def connector_register():
                             allow_redirects=False)
     if not identity.ok or identity.json()["user"]["userName"] != owner:
         abort(403, "Workspace identity is outside this private app.")
+
+
+@app.get("/api/connector/files/<name>")
+def download_connector_file(name):
+    if name not in connector_files:
+        abort(404)
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    require_connector_owner(token if scheme.lower() == "bearer" else None)
+    return send_from_directory(Path(__file__).resolve().parent, name, as_attachment=True)
+
+
+@app.post("/api/connector/register")
+def connector_register():
+    data = body()
+    run = check_id(data.get("run"))
+    pid = check_id(data.get("project"))
+    require_connector_owner(data.get("token"))
     for workspace in inventory():
         session = workspace.get("mostRecentSession") or {}
         if (workspace["projectId"] == pid and workspace["ownerName"] == owner and not workspace["deleted"]
