@@ -1,12 +1,15 @@
 import base64
+import hashlib
+import json
 import os
 import re
+import shlex
 from pathlib import Path
 from threading import Lock
 from urllib.parse import quote, urlencode, urlsplit
 
 import requests
-from flask import Flask, abort, jsonify, redirect, request, send_from_directory
+from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory
 
 from session_hub_broker import Broker
 
@@ -14,9 +17,12 @@ app = Flask(__name__, static_folder="session-hub", static_url_path="/assets")
 app.config["MAX_CONTENT_LENGTH"] = 850_000
 actions = Lock()
 broker = Broker()
-managed_environment = os.environ.get("SESSION_HUB_WORKSPACE_ENVIRONMENT_ID")
-base_environment = os.environ.get("SESSION_HUB_BASE_ENVIRONMENT_ID") or ""
-base_revision = os.environ.get("SESSION_HUB_BASE_REVISION_ID")
+setup_variable = "SESSION_HUB_CONNECTOR_ENVIRONMENT"
+setup_defaults = {
+    "id": os.environ.get("SESSION_HUB_WORKSPACE_ENVIRONMENT_ID"),
+    "baseEnvironment": os.environ.get("SESSION_HUB_BASE_ENVIRONMENT_ID"),
+    "baseRevision": os.environ.get("SESSION_HUB_BASE_REVISION_ID"),
+}
 connector_files = {"session_hub_agent.py", "herdr-workspace.sh"}
 domino_url = os.environ["DOMINO_URL"].rstrip("/")
 project_id = os.environ["DOMINO_PROJECT_ID"]
@@ -139,13 +145,205 @@ def project_summary(project):
     }
 
 
-def supports_connector(environment_config):
-    environment = environment_config.get("environment") or {}
-    return (
-        bool(base_environment and base_revision) and environment.get("id") == base_environment
-        and environment.get("revisionId") == base_revision
-        and not environment_config.get("clusterConfig") and not environment_config.get("computeClusterConfig")
-    )
+def connector_settings():
+    if "connector_settings" not in g:
+        values = domino(f"/v4/projects/{project_id}/environmentVariables")
+        value = next((item["value"] for item in values if item["name"] == setup_variable), None)
+        try:
+            stored = json.loads(value) if value else None
+        except ValueError:
+            stored = None
+        g.connector_settings = stored if isinstance(stored, dict) else setup_defaults
+    return g.connector_settings
+
+
+def environment_status():
+    identifier = connector_settings().get("id")
+    if not identifier:
+        return {"state": "unconfigured"}
+    try:
+        environment = domino(f"/v4/environments/{check_id(identifier)}")
+    except DominoError as error:
+        if error.status in {403, 404}:
+            return {"state": "unavailable", "id": identifier}
+        raise
+    selected = ((environment.get("selectedRevision") or {}).get("status") or "").lower()
+    latest = ((environment.get("latestRevision") or {}).get("status") or "").lower()
+    if environment.get("archived"):
+        state = "unavailable"
+    elif selected == "succeeded":
+        state = "ready"
+    elif (latest or selected) in {"failed", "killed"}:
+        state = "failed"
+    else:
+        state = "building"
+    return {"state": state, "id": identifier, "name": environment["name"]}
+
+
+def app_for_setup(browser_url):
+    if not isinstance(browser_url, str) or len(browser_url) > 2000:
+        abort(400, "Open the published Domino App to set up agent sessions.")
+    browser_url = browser_url.rstrip("/")
+    match = re.search(r"/modelproducts/([a-f0-9]{24})$", browser_url)
+    if match:
+        candidates = [domino(f"/api/apps/v1/apps/{match[1]}")]
+    else:
+        candidates = domino("/api/apps/v1/apps", params={"projectId": project_id})["items"]
+    for candidate in candidates:
+        if candidate["project"]["id"] != project_id:
+            continue
+        if browser_url not in {candidate.get(key, "").rstrip("/") for key in ("url", "vanityUrl")
+                               if candidate.get(key)}:
+            continue
+        details = candidate if match else domino(f"/api/apps/v1/apps/{candidate['id']}")
+        access = details["accessControl"]
+        allowed = {entry["userId"] for entry in access["accessStatuses"] if entry["status"] == "ALLOWED"}
+        if access["visibility"] != "GRANT_BASED_STRICT" or allowed - {details["project"]["ownerId"]}:
+            abort(403, "Restrict this App to its project owner before setting up agent sessions.")
+        if urlsplit(details["url"]).scheme != "https":
+            abort(409, "The private App needs an HTTPS URL for workspace connectors.")
+        return details
+    abort(409, "Open the published Domino App directly to set up agent sessions.")
+
+
+def base_for_setup():
+    settings = domino(f"/v4/projects/{project_id}/settings")
+    identifier = settings.get("defaultEnvironmentId")
+    if not identifier:
+        return None
+    base = domino(f"/v4/environments/{check_id(identifier)}")
+    if ((base.get("selectedRevision") or {}).get("status") or "").lower() == "succeeded":
+        return base
+    return None
+
+
+def revision_details(environment, revision):
+    latest = environment.get("latestRevisionDetails") or {}
+    if latest.get("id") == revision:
+        return latest
+    return domino(f"/v4/environments/environmentRevision/{check_id(revision)}")["environmentRevision"]
+
+
+def setup_hook(app_url):
+    hook = (Path(__file__).resolve().parent / "session-hub-workspace-start.sh").read_text()
+    return (f"SESSION_HUB_OWNER={shlex.quote(owner)}\n"
+            f"SESSION_HUB_APP_URL={shlex.quote(app_url)}\n" + hook)
+
+
+def create_connector_environment(details, base):
+    revision = base["selectedRevision"]["id"]
+    parent = revision_details(base, revision)
+    build = dict(parent.get("buildConfiguration") or {})
+    build.pop("dockerfileInstructions", None)
+    build["preRunScript"] = (build.get("preRunScript") or "") + "\n" + setup_hook(details["url"])
+    identifier = hashlib.sha256(f"workspace-sessions:{details['id']}".encode()).hexdigest()[:24]
+    try:
+        return domino(f"/v4/environments/{identifier}")
+    except DominoError as error:
+        if error.status != 404:
+            raise
+    return domino("/v4/environments", "POST", json={
+        "newEnvironment": {
+            "id": identifier,
+            "name": f"Workspace Sessions · {details['project']['name'][:32]} · {details['id'][-6:]}",
+            "description": f"Connects workspaces to {details['url']}",
+            "visibility": "Private", "addBaseDependencies": False, "isCurated": False,
+            "skipFirstBuild": False, "rebuildOnBaseChanges": "Never", "assignLatestRevisionAsActive": True,
+        },
+        "newEnvironmentRevision": {
+            "baseRevision": {"baseRevisionId": revision},
+            "workspaceTools": (parent.get("workspacesProperties") or {}).get("raw"),
+            "supportedClusters": parent.get("clusterTypes") or [],
+            "buildConfiguration": build, "environmentVariables": {}, "dockerArguments": [],
+            "skipCache": False, "shouldUseVpn": bool(parent.get("shouldUseVPN")),
+            "supportsPackagePersistence": parent.get("supportsPackagePersistence"),
+        },
+    })
+
+
+def save_connector_environment(environment, details):
+    if environment.get("archived"):
+        abort(409, "Choose an active compute environment.")
+    revision = environment.get("selectedRevision") or environment.get("latestRevision") or {}
+    if not revision.get("id"):
+        abort(409, "This environment has no workspace revision.")
+    source = revision_details(environment, revision["id"])
+    script = (source.get("buildConfiguration") or {}).get("preRunScript") or ""
+    prefix = setup_hook(details["url"]).split("\n", 2)[:2]
+    legacy = (f'project = "{project_id}"' in script and
+              f'app_path = "{urlsplit(details["url"]).path}"' in script and
+              f'== {owner} ]]' in script)
+    configured = all(line in script.splitlines() for line in prefix)
+    if not (legacy or configured) or "session_hub_agent.py" not in script or "herdr-workspace.sh" not in script:
+        abort(409, "This environment’s pre-run script must point to this App and Domino owner. See the setup guide.")
+    base = (environment.get("base") or {}) if source.get("imageType") == "Environment" else {}
+    config = {"id": environment["id"], "baseEnvironment": base.get("environmentId"), "baseRevision": base.get("id")}
+    domino(f"/v4/projects/{project_id}/environmentVariables", "POST",
+           json={"name": setup_variable, "value": json.dumps(config)})
+    g.connector_settings = config
+
+
+@app.get("/api/setup")
+def get_setup():
+    details = app_for_setup(request.args.get("appUrl"))
+    base = base_for_setup()
+    return jsonify(owner=owner, appUrl=details["url"], environment=environment_status(),
+                   base={"id": base["id"], "name": base["name"]} if base else None)
+
+
+@app.post("/api/setup")
+def update_setup():
+    data = body()
+    with actions:
+        details = app_for_setup(data.get("appUrl"))
+        mode = data.get("mode")
+        if mode == "create":
+            if environment_status()["state"] in {"ready", "building"}:
+                return jsonify(environment=environment_status())
+            base = base_for_setup()
+            if not base:
+                abort(409, "The App project needs a successfully built default compute environment.")
+            created = create_connector_environment(details, base)
+            environment = domino(f"/v4/environments/{check_id(created['id'])}")
+        elif mode == "link":
+            environment = domino(f"/v4/environments/{check_id(data.get('environmentId'))}")
+        else:
+            abort(400, "Choose to create or link a compute environment.")
+        save_connector_environment(environment, details)
+        return jsonify(environment=environment_status())
+
+
+def connector_compatibility(config):
+    environment = config.get("environment") or {}
+    identifier = environment.get("id")
+    revision = environment.get("revisionId")
+    linked = connector_settings()
+    base_id = linked.get("baseEnvironment")
+    base_revision_id = linked.get("baseRevision")
+    if (not identifier or not revision or not base_id or not base_revision_id or identifier == linked.get("id")
+            or config.get("clusterConfig") or config.get("computeClusterConfig")):
+        return None
+    if identifier == base_id:
+        return "base" if revision == base_revision_id else None
+
+    revisions = g.setdefault("connector_compatibility", {})
+    if revision not in revisions:
+        revisions[revision] = None
+        try:
+            details = domino(f"/v4/environments/environmentRevision/{check_id(revision)}")
+        except DominoError as error:
+            if error.status not in {403, 404}:
+                raise
+        else:
+            parent = details.get("base") or {}
+            previous = details["environmentRevision"]
+            hook = (previous.get("buildConfiguration") or {}).get("preRunScript") or ""
+            if (parent.get("id") == base_revision_id and parent.get("environmentId") == base_id
+                    and previous.get("environmentId") == identifier
+                    and "session_hub_agent.py" in hook and "herdr-workspace.sh" in hook
+                    and ("SESSION_HUB_APP_URL=" in hook or "app_path = " in hook)):
+                revisions[revision] = "previous"
+    return revisions[revision]
 
 
 def workspace_summary(workspace, project):
@@ -157,7 +355,7 @@ def workspace_summary(workspace, project):
     status = session.get("sessionStatusInfo") or {}
     project_info = project_summary(project)
     environment = config.get("environment") or {}
-    can_enable = supports_connector(config)
+    compatibility = connector_compatibility(config)
     ide = None
     if status.get("isRunning") and execution:
         params = urlencode({
@@ -170,8 +368,9 @@ def workspace_summary(workspace, project):
         "name": workspace["name"], "state": workspace["state"],
         "running": bool(ide), "ide": ide, "ssh": ssh_enabled, "run": execution,
         "tool": next(iter((session.get("config") or config).get("tools") or []), None),
-        "managed": bool(managed_environment) and environment.get("id") == managed_environment,
-        "canEnable": can_enable,
+        "managed": bool(connector_settings().get("id")) and environment.get("id") == connector_settings()["id"],
+        "canEnable": bool(compatibility),
+        "previousConnector": compatibility == "previous",
         "connector": broker.status(execution),
         "dataPlane": data_plane if workspace.get("dataPlaneId") != "000000000000000000000000" else None,
         "local": bool(local_run and execution == local_run),
@@ -193,9 +392,10 @@ def get_inventory():
         for item in inventory()
         if item["ownerName"] == owner and item["projectId"] in by_id and not item["deleted"]
     ]
+    setup = environment_status()
     return jsonify(
         projects=[project_summary(item) for item in visible], workspaces=workspaces,
-        dominoUrl=domino_url, hubProject=project_id, user=owner, managedAvailable=managed_ready(),
+        dominoUrl=domino_url, hubProject=project_id, user=owner, managedAvailable=setup["state"] == "ready", setup=setup,
     )
 
 
@@ -208,8 +408,9 @@ def configuration(pid):
     if not environment or not tier:
         abort(409, "This project needs a default environment and hardware tier in Domino.")
     tools = available_tools(pid, environment)
-    connector_tools = available_tools(pid, managed_environment) if managed_ready() else []
-    return jsonify(tools=tools, connectorTools=connector_tools, sameBase=environment == base_environment)
+    linked = connector_settings()
+    connector_tools = available_tools(pid, linked["id"]) if managed_ready() else []
+    return jsonify(tools=tools, connectorTools=connector_tools, sameBase=environment == linked.get("baseEnvironment"))
 
 
 def available_tools(pid, environment):
@@ -218,15 +419,7 @@ def available_tools(pid, environment):
 
 
 def managed_ready():
-    if not managed_environment:
-        return False
-    try:
-        environment = domino(f"/v4/environments/{check_id(managed_environment)}")
-    except DominoError as error:
-        if error.status in {403, 404}:
-            return False
-        raise
-    return (environment.get("selectedRevision") or {}).get("status") == "Succeeded"
+    return environment_status()["state"] == "ready"
 
 
 def start_session(pid, workspace):
@@ -256,14 +449,14 @@ def resume(pid, wid):
             return jsonify(id=wid)
         if workspace["state"] != "Stopped":
             abort(409, "Wait for Domino to finish the current workspace operation.")
+        config = workspace["configTemplate"]
         if body().get("managed") is True:
-            config = workspace["configTemplate"]
-            if not supports_connector(config):
+            if not connector_compatibility(config):
                 abort(409, "This workspace uses a different environment. Resume it with its existing settings.")
             if not managed_ready():
                 abort(409, "The Workspace Sessions environment is still building.")
             domino(workspace_path(pid, wid), "POST", json={
-                "name": workspace["name"], "environmentId": managed_environment,
+                "name": workspace["name"], "environmentId": connector_settings()["id"],
                 "environmentRevisionSpec": "ActiveRevision", "hardwareTierId": config["hardwareTier"]["id"],
                 "tools": config["tools"], "ssh": config.get("ssh"),
                 "persistence": {"persistHomeDirectory": True, "persistPackages": True},
@@ -305,7 +498,7 @@ def stop_for_connector(pid, wid):
         workspace = domino(workspace_path(pid, wid))
         if workspace["ownerName"] != owner or workspace["deleted"]:
             abort(403, "Only your workspaces can be restarted from the app.")
-        if not supports_connector(workspace.get("configTemplate") or {}) or not managed_ready():
+        if not connector_compatibility(workspace.get("configTemplate") or {}) or not managed_ready():
             abort(409, "A compatible Workspace Sessions environment is unavailable.")
         if workspace["state"] == "Stopped":
             return jsonify(id=wid)
@@ -337,7 +530,7 @@ def create(pid):
     if data.get("managed") is True:
         if not managed_ready():
             abort(409, "The Workspace Sessions environment is unavailable.")
-        environment = managed_environment
+        environment = connector_settings()["id"]
         revision = "ActiveRevision"
     if tool not in {item["id"] for item in available_tools(pid, environment)}:
         abort(400, "This IDE is unavailable in the selected environment.")

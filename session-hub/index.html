@@ -15,6 +15,7 @@
   <a class="brand" href="./">Workspace Sessions</a>
   <div class="nav-right">
     <button id="browse-projects" type="button">Browse projects</button>
+    <button id="connector-settings" type="button">Connector setup</button>
     <button id="refresh" type="button">Refresh</button>
     <button id="theme" type="button" aria-pressed="false">Dark mode</button>
   </div>
@@ -22,6 +23,10 @@
 <main>
   <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Running workspaces"></div>
   <p id="status" role="status">Loading workspaces…</p>
+  <div id="connector-setup-banner" class="setup-banner" hidden>
+    <span id="connector-setup-status" role="status"></span>
+    <button id="connector-setup-open" type="button" class="primary">Set up agent sessions</button>
+  </div>
   <section id="empty-workspaces" class="empty" hidden>
     <h1>No running workspaces</h1>
     <button id="empty-browse" type="button" class="primary">Browse projects</button>
@@ -75,6 +80,27 @@
   </div>
   <input id="history-search" type="search" placeholder="Search titles, agents, or IDs" aria-label="Search conversation history">
   <div id="history-list" aria-live="polite"></div>
+</dialog>
+<dialog id="setup-dialog" aria-labelledby="setup-heading">
+  <div class="dialog-heading">
+    <h2 id="setup-heading">Workspace connector</h2>
+    <form method="dialog"><button>Close</button></form>
+  </div>
+  <p id="setup-owner" class="meta"></p>
+  <p id="setup-feedback" role="status"></p>
+  <div id="setup-options" hidden>
+    <div class="actions">
+      <button id="setup-create" type="button" class="primary">Create private environment</button>
+      <a id="setup-environment-link" target="_blank" rel="noopener" hidden>Open environment in Domino</a>
+    </div>
+    <form id="setup-link">
+      <label>Existing connector environment ID
+        <input name="environmentId" required pattern="[0-9a-f]{24}" spellcheck="false">
+      </label>
+      <p class="meta">Use an environment whose pre-run script points to this App.</p>
+      <div><button type="submit">Link environment</button></div>
+    </form>
+  </div>
 </dialog>
 <dialog id="dialog"><div id="dialog-body"></div><form method="dialog"><button>Close</button></form></dialog>
 </body>

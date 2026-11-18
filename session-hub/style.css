@@ -137,3 +137,8 @@ button.confirm-danger:hover { background: #a40922; color: white; }
   #projects { max-height: 135px; }
   .detail { max-height: 42vh; }
 }
+
+.setup-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+#setup-owner { overflow-wrap: anywhere; }
+#setup-link { border-top: 1px solid var(--border); padding-top: 12px; }
+#setup-link p { margin: 0; }

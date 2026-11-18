@@ -3,6 +3,11 @@ const dialog = byId('dialog');
 const dialogBody = byId('dialog-body');
 const projectsDialog = byId('projects-dialog');
 const historyDialog = byId('history-dialog');
+const setupDialog = byId('setup-dialog');
+const setupAppUrl = location.origin + location.pathname;
+let setupDetails;
+let setupTimer;
+let setupBusy = false;
 let data;
 let selected;
 const pending = new Set();
@@ -56,6 +61,7 @@ function render() {
   const running = data.workspaces.filter(workspace => workspace.running && !changing.has(workspace.id));
   const retained = running.find(workspace => workspace.id === agentWorkspace?.id &&
     workspace.run === agentWorkspace?.run);
+  if (retained) Object.assign(agentWorkspace, retained);
   const previous = localStorage.getItem('workspace-sessions-active');
   const next = retained || running.find(workspace => workspace.id === previous) ||
     running.find(workspace => workspace.connector.ready) || running[0];
@@ -65,6 +71,94 @@ function render() {
   byId('empty-workspaces').hidden = Boolean(next);
   renderProjects();
   renderDetail();
+  renderSetup();
+}
+
+function setupMessage(state, name) {
+  switch (state) {
+    case 'ready': return `${name} is ready for agent sessions.`;
+    case 'building': return `Domino is building ${name}. This page will update when it’s ready.`;
+    case 'failed': return `The build for ${name} failed. Open the environment in Domino to check its build log.`;
+    case 'unavailable': return 'The configured connector environment is unavailable.';
+    default: return 'Set up a workspace environment to launch Codex and Claude Code from this App.';
+  }
+}
+
+function renderSetup() {
+  const setup = data?.setup || {state: 'unconfigured'};
+  const {state, name, id} = setup;
+  const buildPending = state === 'building';
+  byId('connector-setup-banner').hidden = state === 'ready';
+  byId('connector-setup-status').textContent = setupMessage(state, name);
+  byId('connector-setup-open').textContent = state === 'unconfigured' ? 'Set up agent sessions' : 'View setup';
+  clearTimeout(setupTimer);
+  if (buildPending) {
+    setupTimer = setTimeout(() => refresh().catch(error => {
+      notice(error.message, true);
+      renderSetup();
+    }), 5000);
+  }
+  if (!setupDetails || !setupDialog.open) return;
+  byId('setup-feedback').textContent = setupMessage(state, name);
+  byId('setup-create').hidden = !['unconfigured', 'unavailable'].includes(state);
+  byId('setup-create').disabled = setupBusy || !setupDetails.base;
+  byId('setup-create').textContent = setupDetails.base
+    ? `Create from ${setupDetails.base.name}` : 'Create private environment';
+  if (!setupDetails.base && state === 'unconfigured') {
+    byId('setup-feedback').textContent = 'Choose a successfully built default compute environment in your App project, or link an existing connector environment.';
+  }
+  const environmentLink = byId('setup-environment-link');
+  environmentLink.hidden = !id;
+  if (id) environmentLink.href = `${data.dominoUrl}/environments/${id}`;
+  byId('setup-link').querySelector('button').disabled = setupBusy;
+}
+
+async function openSetup() {
+  if (setupDialog.open) return;
+  if (!data) {
+    try {
+      await refresh();
+    } catch (error) {
+      notice(error.message, true);
+      return;
+    }
+    if (setupDialog.open) return;
+  }
+  setupDetails = null;
+  byId('setup-options').hidden = true;
+  byId('setup-owner').textContent = '';
+  byId('setup-feedback').textContent = 'Finding this Domino App…';
+  setupDialog.showModal();
+  try {
+    setupDetails = await api('setup?' + new URLSearchParams({appUrl: setupAppUrl}));
+    const {owner, appUrl, environment} = setupDetails;
+    byId('setup-owner').textContent = `${owner} · ${appUrl}`;
+    byId('setup-options').hidden = false;
+    data.setup = environment;
+    renderSetup();
+  } catch (error) {
+    byId('setup-feedback').textContent = error.message;
+  }
+}
+
+async function configureConnector(mode, environmentId) {
+  if (setupBusy) return;
+  setupBusy = true;
+  renderSetup();
+  byId('setup-feedback').textContent = mode === 'create' ? 'Requesting an environment build…' : 'Checking the environment…';
+  let failure;
+  try {
+    const result = await api('setup', {appUrl: setupAppUrl, mode, environmentId});
+    data.setup = result.environment;
+    data.managedAvailable = data.setup.state === 'ready';
+    await refresh();
+  } catch (error) {
+    failure = error.message;
+  } finally {
+    setupBusy = false;
+    renderSetup();
+    if (failure) byId('setup-feedback').textContent = failure;
+  }
 }
 
 function renderWorkspaceTabs() {
@@ -153,9 +247,13 @@ function row(workspace) {
       button('Stop', () => confirmWorkspaceAction(workspace, 'stop')));
   } else if (workspace.state === 'Stopped' && !transition && !pending.has(workspace.id)) {
     const path = `projects/${workspace.projectId}/workspaces/${workspace.id}/resume`;
-    controls.append(button('Resume workspace', () => runAction(path, {}), 'primary'));
-    if (workspace.canEnable && data.managedAvailable) {
-      controls.append(button('Resume with agent sessions', () => runAction(path, {managed: true})));
+    if (workspace.previousConnector && data.managedAvailable) {
+      controls.append(button('Resume on this App', () => runAction(path, {managed: true}), 'primary'));
+    } else {
+      controls.append(button('Resume workspace', () => runAction(path, {}), 'primary'));
+      if (workspace.canEnable && data.managedAvailable) {
+        controls.append(button('Resume with agent sessions', () => runAction(path, {managed: true})));
+      }
     }
     controls.append(button('Delete', () => confirmWorkspaceAction(workspace, 'delete'), 'danger'));
   }
@@ -327,7 +425,8 @@ async function loadAgents(workspace) {
     if (!list.ready) {
       byId('agent-controls').replaceChildren();
       if (!list.connected && workspace.canEnable && data.managedAvailable) {
-        byId('agent-controls').append(button('Restart with agent sessions',
+        const label = workspace.previousConnector ? 'Restart on this App' : 'Restart with agent sessions';
+        byId('agent-controls').append(button(label,
           () => confirmConnectorRestart(workspace), 'primary'));
       }
       runningAgents = [];
@@ -335,7 +434,9 @@ async function loadAgents(workspace) {
       agentNotice(list.detail || (workspace.managed
         ? 'Waiting for the workspace connector to start…'
         : workspace.canEnable && data.managedAvailable
-          ? 'Restart this workspace to enable agent sessions here.'
+          ? workspace.previousConnector
+            ? 'Restart this workspace to connect it to this App and load saved conversations.'
+            : 'Restart this workspace to enable agent sessions here.'
           : 'Agent sessions are unavailable for this workspace’s environment.'));
       return;
     }
@@ -603,7 +704,9 @@ async function watchWorkspaceAction(workspace, deleting) {
 function confirmConnectorRestart(workspace) {
   dialogBody.replaceChildren(
     element('h2', `Restart ${workspace.project} with agent sessions?`),
-    element('p', 'This ends processes currently running in the workspace. Domino will resume the same workspace with the connector enabled.'),
+    element('p', workspace.previousConnector
+      ? 'This ends running processes and resumes the same workspace with this App’s connector. You can resume saved conversations from History.'
+      : 'This ends processes currently running in the workspace. Domino will resume the same workspace with the connector enabled.'),
     button('Restart workspace', () => {
       dialog.close();
       restartWithConnector(workspace);
@@ -758,8 +861,18 @@ for (const id of ['workspace-tabs', 'agent-running']) {
     tabs[next].focus();
   });
 }
+byId('connector-settings').addEventListener('click', openSetup);
+byId('connector-setup-open').addEventListener('click', openSetup);
+byId('setup-create').addEventListener('click', () => configureConnector('create'));
+byId('setup-link').addEventListener('submit', event => {
+  event.preventDefault();
+  configureConnector('link', new FormData(event.currentTarget).get('environmentId').trim());
+});
 byId('refresh').addEventListener('click', () => refresh().catch(error => notice(error.message, true)));
-refresh().then(() => notice('')).catch(error => notice(error.message, true));
+refresh().then(() => {
+  notice('');
+  if (data.setup?.state === 'unconfigured') openSetup();
+}).catch(error => notice(error.message, true));
 
 const themeControl = byId('theme');
 function setTheme(theme) {
