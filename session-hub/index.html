@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workspace Sessions</title>
+<link rel="stylesheet" href="./assets/xterm.css">
+<link rel="stylesheet" href="./assets/style.css">
+<script src="./assets/xterm.js" defer></script>
+<script src="./assets/xterm-fit.js" defer></script>
+<script src="./assets/hub.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="./">Workspace Sessions</a>
+  <div class="nav-right">
+    <button id="browse-projects" type="button">Browse projects</button>
+    <button id="refresh" type="button">Refresh</button>
+    <button id="theme" type="button" aria-pressed="false">Dark mode</button>
+  </div>
+</header>
+<main>
+  <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Running workspaces"></div>
+  <p id="status" role="status">Loading workspaces…</p>
+  <section id="empty-workspaces" class="empty" hidden>
+    <h1>No running workspaces</h1>
+    <button id="empty-browse" type="button" class="primary">Browse projects</button>
+  </section>
+  <section id="agent-panel" class="agents" aria-labelledby="agent-title" hidden>
+    <div class="work-bar">
+      <div class="workspace-heading">
+        <h1 id="agent-title" tabindex="-1"></h1>
+        <span id="workspace-name" class="meta"></span>
+      </div>
+      <div id="workspace-controls" class="actions"></div>
+    </div>
+    <div class="agent-bar">
+      <div class="agent-switcher">
+        <div id="agent-running" class="agent-tabs" role="tablist" aria-label="Agent panes"></div>
+        <div id="workspace-ide"></div>
+      </div>
+      <div id="agent-controls" class="actions"></div>
+    </div>
+    <p id="agent-summary" role="status" hidden></p>
+    <div id="agent-view">
+      <div id="agent-empty" class="empty compact" hidden></div>
+      <div id="terminal-panel" hidden>
+        <div class="terminal-bar"><span id="terminal-title"></span><button id="terminal-detach">Detach</button></div>
+        <div id="terminal"></div>
+      </div>
+    </div>
+    <div id="ide-panel" hidden>
+      <div class="terminal-bar"><span id="ide-title"></span><div id="ide-actions" class="actions"></div></div>
+      <div id="ide-frame"></div>
+    </div>
+  </section>
+</main>
+<dialog id="projects-dialog" class="wide-dialog" aria-labelledby="project-heading">
+  <div class="dialog-heading">
+    <h2 id="project-heading">Projects</h2>
+    <form method="dialog"><button>Close</button></form>
+  </div>
+  <div class="project-browser">
+    <aside>
+      <input id="search" type="search" placeholder="Search all projects" aria-label="Search all projects">
+      <div id="projects"></div>
+    </aside>
+    <div class="detail" id="detail"></div>
+  </div>
+</dialog>
+<dialog id="history-dialog" class="wide-dialog" aria-labelledby="history-title">
+  <div class="dialog-heading">
+    <h2 id="history-title">Conversation history</h2>
+    <form method="dialog"><button>Close</button></form>
+  </div>
+  <input id="history-search" type="search" placeholder="Search titles, agents, or IDs" aria-label="Search conversation history">
+  <div id="history-list" aria-live="polite"></div>
+</dialog>
+<dialog id="dialog"><div id="dialog-body"></div><form method="dialog"><button>Close</button></form></dialog>
+</body>
+</html>

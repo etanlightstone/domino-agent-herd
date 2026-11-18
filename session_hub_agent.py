@@ -1,0 +1,557 @@
+"""Workspace-side connector for managing Herdr Codex and Claude Code sessions."""
+
+import json
+import os
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+from queue import Empty, Queue
+from tempfile import NamedTemporaryFile
+from threading import Event, Lock, Thread
+from uuid import uuid4
+
+import requests
+
+APP_URL = sys.argv[1]
+BOOTSTRAP = sys.argv[2]
+PROJECT = os.environ["DOMINO_PROJECT_ID"]
+RUN = os.environ["DOMINO_RUN_ID"]
+ROOT = Path("/mnt/code") if Path("/mnt/code/.git").exists() else Path("/mnt")
+TERMINALS = {}
+PENDING_PANES = {}
+HISTORY_CACHE = (0, [])
+RUNNING_LABELS = {}
+EVENTS = Queue(maxsize=100)
+MANAGE = Lock()
+HERDR = ["herdr", "--session", "domino-hub"]
+AGENT_FLAGS = {
+    "codex": "--yolo",
+    "claude": "--dangerously-skip-permissions",
+}
+ENTRY = re.compile(r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
+os.environ["PATH"] = str(Path.home() / ".local/bin") + ":" + os.environ["PATH"]
+
+
+def herdr(*args):
+    result = subprocess.run([*HERDR, *args], capture_output=True, text=True, timeout=10)
+    try:
+        payload = json.loads(result.stdout)
+        return payload["result"]
+    except (KeyError, ValueError) as failure:
+        raise RuntimeError("Herdr could not complete that action.") from failure
+
+
+def agent_restore_environment():
+    # Herdr's native cold restore invokes the agent by name with its saved session ID.
+    # Give this Herdr server its own launchers and leave each workspace's CLI installs intact.
+    directory = Path.home() / ".cache/domino-herdr/agent-bin"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for kind, flag in AGENT_FLAGS.items():
+        executable = shutil.which(kind)
+        target = directory / kind
+        if not executable:
+            target.unlink(missing_ok=True)
+            continue
+        command = shlex.quote(executable)
+        option = shlex.quote(flag)
+        script = f"""#!/bin/sh
+unset NO_COLOR
+for arg in "$@"; do
+  if [ "$arg" = {option} ]; then
+    exec {command} "$@"
+  fi
+done
+exec {command} {option} "$@"
+"""
+        with NamedTemporaryFile(dir=directory, mode="w", delete=False) as launcher:
+            candidate = Path(launcher.name)
+            try:
+                launcher.write(script)
+                launcher.flush()
+                os.fchmod(launcher.fileno(), 0o700)
+                candidate.replace(target)
+            finally:
+                candidate.unlink(missing_ok=True)
+    return {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"}
+
+
+def ensure_server():
+    try:
+        return herdr("api", "snapshot")
+    except RuntimeError:
+        log = Path.home() / ".cache/domino-herdr/herdr-server.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as output:
+            subprocess.Popen([*HERDR, "server"], cwd=ROOT, start_new_session=True,
+                             env=agent_restore_environment(), stdin=subprocess.DEVNULL,
+                             stdout=output, stderr=output)
+        for _ in range(30):
+            time.sleep(.2)
+            try:
+                return herdr("api", "snapshot")
+            except RuntimeError:
+                continue
+        raise RuntimeError("The Herdr server could not start in this workspace.")
+
+
+def history_title(*values):
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())[:145]
+    return "Untitled conversation"
+
+
+def json_lines(path, limit):
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for index, line in enumerate(stream):
+            if index >= limit:
+                break
+            if len(line) <= 600_000:
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        yield row
+                except ValueError:
+                    continue
+
+
+def history_cwd(value):
+    if isinstance(value, str) and Path(value).is_absolute():
+        directory = Path(value).resolve()
+        if directory.is_relative_to(ROOT.resolve()) and directory.is_dir():
+            return str(directory)
+    return None
+
+
+def codex_index(directory):
+    index = {}
+    try:
+        for row in json_lines(directory / "session_index.jsonl", 4000):
+            if isinstance(row.get("id"), str):
+                index[row["id"]] = row
+    except OSError:
+        pass
+
+    for path in sorted(directory.glob("state_*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True):
+        try:
+            with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=.2) as db:
+                db.row_factory = sqlite3.Row
+                columns = {row["name"] for row in db.execute("PRAGMA table_info(threads)")}
+                fields = ["id", "title", "first_user_message", "updated_at", "archived", "name"]
+                selected = ", ".join(field for field in fields if field in columns)
+                if not {"id", "updated_at"}.issubset(columns):
+                    continue
+                for row in db.execute(f"SELECT {selected} FROM threads ORDER BY updated_at DESC LIMIT 500"):
+                    index.setdefault(row["id"], {}).update(dict(row))
+            break
+        except sqlite3.Error:
+            continue
+    return index
+
+
+def codex_saved():
+    directory = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").resolve()
+    index = codex_index(directory)
+    for file in sorted((directory / "sessions").glob("*/*/*/*.jsonl"), reverse=True)[:220]:
+        try:
+            rows = json_lines(file, 85)
+            first = next(rows, {})
+            meta = first.get("payload") or {}
+            session = meta.get("id")
+            cwd = history_cwd(meta.get("cwd"))
+            if not isinstance(session, str) or not ENTRY.fullmatch(session) or not cwd:
+                continue
+            item = index.get(session, {})
+            if item.get("archived"):
+                continue
+            prompt = item.get("first_user_message")
+            if not any(item.get(field) for field in ("thread_name", "name", "title")) and not prompt:
+                for row in rows:
+                    payload = row.get("payload") or {}
+                    if payload.get("type") == "user_message":
+                        prompt = payload.get("message")
+                        if prompt:
+                            break
+            title = history_title(item.get("name"), item.get("thread_name"), item.get("title"), prompt)
+            yield {"id": session, "kind": "codex", "label": title, "cwd": cwd,
+                   "updated": item.get("updated_at") or file.stat().st_mtime}
+        except (OSError, TypeError, ValueError, AttributeError):
+            continue
+
+
+def claude_saved():
+    directory = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    root_prefix = str(ROOT).replace("/", "-")
+    files = []
+    index = {}
+    for project in directory.glob(root_prefix + "*"):
+        if project.name == root_prefix or project.name.startswith(root_prefix + "-"):
+            try:
+                metadata = json.loads((project / "sessions-index.json").read_text())
+                for entry in metadata.get("entries", []):
+                    if isinstance(entry, dict) and isinstance(entry.get("sessionId"), str):
+                        index[entry["sessionId"]] = entry
+            except (OSError, ValueError, AttributeError):
+                pass
+            for file in project.glob("*.jsonl"):
+                if ENTRY.fullmatch(file.stem):
+                    try:
+                        files.append((file.stat().st_mtime, file))
+                    except OSError:
+                        continue
+    for modified, file in sorted(files, reverse=True)[:120]:
+        try:
+            entry = index.get(file.stem, {})
+            cwd = history_cwd(entry.get("projectPath"))
+            prompt = entry.get("firstPrompt")
+            title = entry.get("customTitle")
+            summary = entry.get("summary")
+            slug = None
+            for row in json_lines(file, 160):
+                cwd = cwd or history_cwd(row.get("cwd"))
+                slug = slug or row.get("slug")
+                if row.get("type") == "custom-title":
+                    title = row.get("customTitle") or title
+                elif row.get("type") == "summary":
+                    summary = row.get("summary") or summary
+                elif not prompt and row.get("type") == "user" and not row.get("isMeta") and not row.get("isSidechain"):
+                    message = (row.get("message") or {}).get("content")
+                    if isinstance(message, list):
+                        message = next((block.get("text") for block in message
+                                        if isinstance(block, dict) and block.get("type") == "text"), None)
+                    if isinstance(message, str) and not message.lstrip().startswith(("<", "/")):
+                        prompt = message
+                if cwd and title and prompt:
+                    break
+            if cwd:
+                yield {"id": file.stem, "kind": "claude", "label": history_title(title, summary, prompt, slug),
+                       "updated": modified, "cwd": cwd}
+        except (OSError, TypeError, ValueError, AttributeError):
+            continue
+
+
+def session_history(refresh=False):
+    global HISTORY_CACHE
+    now = time.monotonic()
+    loaded, rows = HISTORY_CACHE
+    if refresh or now - loaded > 10:
+        rows = sorted([*codex_saved(), *claude_saved()], key=lambda item: item["updated"], reverse=True)
+        HISTORY_CACHE = (now, rows)
+    return rows
+
+
+def running_agents():
+    agents = {agent["pane_id"]: agent for agent in herdr("agent", "list")["agents"]}
+    panes = herdr("pane", "list")["panes"]
+    labels = {tab["tab_id"]: tab["label"] for tab in herdr("tab", "list")["tabs"]}
+    running = []
+    for pane in panes:
+        title = labels.get(pane["tab_id"], "")
+        name, _, hint = title.partition(" · ")
+        if name not in {"Codex", "Claude Code"}:
+            continue
+        pane_id = pane["pane_id"]
+        kind = "codex" if name == "Codex" else "claude"
+        agent = agents.get(pane_id) or {}
+        launching = PENDING_PANES.get(pane_id, 0) > time.monotonic()
+        nav_session = (agent.get("agent_session") or pane.get("agent_session") or {}).get("value")
+        session = nav_session if isinstance(nav_session, str) and ENTRY.fullmatch(nav_session) else None
+        if not session and (agent or pane.get("agent") == kind or launching):
+            try:
+                foreground = herdr("pane", "process-info", "--pane", pane_id)["process_info"]
+                for process in foreground["foreground_processes"]:
+                    if process.get("name") != kind:
+                        continue
+                    argv = process.get("argv") or []
+                    for position, value in enumerate(argv[:-1]):
+                        if value in {"resume", "--resume", "--session-id"} and ENTRY.fullmatch(argv[position + 1]):
+                            session = argv[position + 1]
+                            break
+                    if session:
+                        break
+            except (RuntimeError, OSError, KeyError, subprocess.TimeoutExpired):
+                pass
+        if agent or pane.get("agent") == kind or launching:
+            status = agent.get("agent_status") or pane.get("agent_status")
+            running.append({"pane": pane_id, "label": title, "kind": kind, "session": session,
+                            "prefix": hint if re.fullmatch(r"[a-f0-9]{8}", hint) else None,
+                            "status": "Starting" if launching and status == "unknown" else status})
+    return running
+
+
+def is_running(item, running):
+    return any(
+        pane["kind"] == item["kind"]
+        and (pane["session"] == item["id"] or
+             (not pane["session"] and pane["prefix"] and item["id"].startswith(pane["prefix"])))
+        for pane in running
+    )
+
+
+def inventory(include_history=True):
+    running = running_agents()
+    rows = session_history(refresh=include_history)
+    indexed = {(row["kind"], row["id"]): row["label"] for row in rows}
+    live = []
+    for pane in running:
+        label = indexed.get((pane["kind"], pane["session"])) or RUNNING_LABELS.get(pane["pane"])
+        live.append({"pane": pane["pane"], "label": pane["label"], "kind": pane["kind"],
+                     "title": label or pane["label"], "status": pane["status"]})
+    saved = [item for item in rows if not is_running(item, running)] if include_history else []
+    return {"running": live, "saved": saved[:100]}
+
+
+def launch(kind, conversation):
+    if kind not in AGENT_FLAGS:
+        raise RuntimeError("Choose Codex or Claude Code.")
+    snapshot = ensure_server()["snapshot"]
+    cwd = str(ROOT)
+    saved = None
+    if conversation:
+        if not isinstance(conversation, str) or not ENTRY.fullmatch(conversation):
+            raise RuntimeError("Select a saved conversation.")
+        if is_running({"kind": kind, "id": conversation}, running_agents()):
+            raise RuntimeError("This conversation is already running. Attach to its pane.")
+        saved = next((row for row in session_history(refresh=True)
+                      if row["kind"] == kind and row["id"] == conversation), None)
+        if not saved:
+            raise RuntimeError("This conversation is no longer available in the workspace.")
+        cwd = saved["cwd"]
+    agent = [kind, AGENT_FLAGS[kind]]
+    if conversation:
+        agent.extend(["resume", conversation] if kind == "codex" else ["--resume", conversation])
+    elif kind == "claude":
+        agent.extend(["--session-id", str(uuid4())])
+    name = "Codex" if kind == "codex" else "Claude Code"
+    label = f"{name} · {conversation[:8] if conversation else time.strftime('%H:%M:%S')}"
+    snapshot = ensure_server()["snapshot"]
+    if not snapshot.get("workspaces"):
+        herdr("workspace", "create", "--cwd", str(ROOT), "--label", "Workspace Sessions")
+    title = saved["label"] if saved else label
+    pane = herdr("tab", "create", "--cwd", cwd, "--label", label)["root_pane"]["pane_id"]
+    process = subprocess.run([*HERDR, "pane", "run", pane, "env", "-u", "NO_COLOR", "--", *agent], timeout=10,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if process.returncode:
+        raise RuntimeError("Herdr could not start the CLI in this workspace.")
+    now = time.monotonic()
+    for expired in [key for key, deadline in PENDING_PANES.items() if deadline <= now]:
+        del PENDING_PANES[expired]
+    PENDING_PANES[pane] = now + 30
+    RUNNING_LABELS[pane] = title
+    return {"pane": pane, "label": title}
+
+
+def read_terminal(channel, child):
+    try:
+        for line in child.stdout:
+            record = json.loads(line)
+            if record.get("type") == "terminal.frame" and isinstance(record.get("bytes"), str):
+                frame = record["bytes"]
+                for offset in range(0, len(frame), 60_000):
+                    EVENTS.put({"channel": channel, "bytes": frame[offset:offset + 60_000]})
+    except (OSError, ValueError):
+        pass
+    finally:
+        EVENTS.put({"channel": channel, "closed": True})
+        if TERMINALS.get(channel) is child:
+            TERMINALS.pop(channel, None)
+        child.wait()
+
+
+def attach(pane, channel):
+    if not re.fullmatch(r"w[0-9]+:p[0-9]+", pane):
+        raise RuntimeError("That agent pane is unavailable.")
+    current = next((row for row in herdr("pane", "list")["panes"] if row["pane_id"] == pane), None)
+    tabs = herdr("tab", "list")["tabs"]
+    if not current or not any(tab["tab_id"] == current["tab_id"] and
+                              tab["label"].startswith(("Codex · ", "Claude Code · ")) for tab in tabs):
+        raise RuntimeError("That agent pane has closed.")
+    child = subprocess.Popen([*HERDR, "terminal", "session", "control", pane,
+                              "--takeover", "--cols", "100", "--rows", "30"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    TERMINALS[channel] = child
+    Thread(target=read_terminal, args=(channel, child), daemon=True).start()
+
+
+def terminal_input(channel, action):
+    child = TERMINALS.get(channel)
+    if child and child.poll() is None:
+        try:
+            child.stdin.write(json.dumps(action) + "\n")
+            child.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+
+def handle(command):
+    operation = command["operation"]
+    tag = command.get("request")
+    try:
+        with MANAGE:
+            if operation == "inventory":
+                value = inventory(include_history=command.get("include_history", True))
+            elif operation == "launch":
+                value = launch(command["kind"], command.get("conversation"))
+            elif operation == "attach":
+                attach(command["pane"], command["channel"])
+                value = True
+            else:
+                raise RuntimeError("Unknown connector action.")
+        EVENTS.put({"request": tag, "value": value})
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, KeyError) as error:
+        EVENTS.put({"request": tag, "error": str(error)})
+
+
+def prepare():
+    global ready, detail
+    try:
+        subprocess.run(["bash", BOOTSTRAP, "prepare"], timeout=360)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        ensure_server()
+        for kind in ("codex", "claude"):
+            try:
+                subprocess.run([*HERDR, "integration", "install", kind], timeout=12, check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.TimeoutExpired):
+                print(f"Herdr could not install {kind}'s session reporting hook.", file=sys.stderr)
+        cache = Path.home() / ".cache/domino-herdr"
+        missed = []
+        for command, label in (("codex", "Codex"), ("claude", "Claude Code")):
+            stamp = cache / f"{command}-updated"
+            if not stamp.exists() or stamp.read_text().strip() != RUN:
+                missed.append(label)
+        detail = f"{' and '.join(missed)} didn’t finish updating in this run. Check the workspace connector log for details." if missed else ""
+        ready = True
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+        detail = "Herdr could not start. Check connector.log in the workspace."
+
+
+class Connection:
+    def __init__(self):
+        self.key = None
+        self.protocol = 1
+        self.reconnect = Event()
+        self.token = ""
+        self.refresh_at = 0
+        self.lock = Lock()
+
+    def access_token(self):
+        with self.lock:
+            if time.monotonic() >= self.refresh_at:
+                response = requests.get("http://127.0.0.1:8899/access-token", timeout=5)
+                response.raise_for_status()
+                self.token = response.text.strip()
+                self.refresh_at = time.monotonic() + 40
+            return self.token
+
+    def post(self, client, path, data):
+        return client.post(APP_URL + "api/connector/" + path, json=data,
+                           headers={"Authorization": "Bearer " + self.access_token()},
+                           timeout=(5, 15), allow_redirects=False)
+
+    def register(self, client):
+        token = self.access_token()
+        result = self.post(client, "register", {"run": RUN, "project": PROJECT, "token": token})
+        if not result.ok:
+            raise RuntimeError(f"Connector registration returned HTTP {result.status_code}.")
+        data = result.json()
+        self.protocol = data.get("protocol", 1)
+        self.key = data["key"]
+
+    def payload(self, key, events=()):
+        return {"run": RUN, "key": key, "ready": ready, "detail": detail, "events": events}
+
+    def push_events(self):
+        with requests.Session() as client:
+            while True:
+                key = self.key
+                if not key or self.protocol < 2 or self.reconnect.is_set():
+                    time.sleep(.15)
+                    continue
+                try:
+                    first = EVENTS.get(timeout=.4)
+                except Empty:
+                    continue
+                batch = [first]
+                drain(batch)
+                while self.key == key and not self.reconnect.is_set():
+                    try:
+                        response = self.post(client, "poll?eventsOnly=1", self.payload(key, batch))
+                        if response.status_code in {401, 403}:
+                            self.reconnect.set()
+                            break
+                        response.raise_for_status()
+                        break
+                    except requests.RequestException as failure:
+                        print(failure, file=sys.stderr, flush=True)
+                        time.sleep(.75)
+
+
+def drain(batch):
+    while len(batch) < 10:
+        try:
+            batch.append(EVENTS.get_nowait())
+        except Empty:
+            break
+
+
+def dispatch(command):
+    if command["operation"] == "terminal":
+        terminal_input(command["channel"], command["action"])
+    elif command["operation"] == "detach":
+        child = TERMINALS.get(command["channel"])
+        if child:
+            child.terminate()
+    else:
+        Thread(target=handle, args=(command,), daemon=True).start()
+
+
+def run():
+    link = Connection()
+    Thread(target=link.push_events, daemon=True).start()
+    batch = []
+    with requests.Session() as client:
+        while True:
+            try:
+                if link.reconnect.is_set():
+                    link.key = None
+                    link.refresh_at = 0
+                    link.reconnect.clear()
+                    batch.clear()
+                    for child in list(TERMINALS.values()):
+                        child.terminate()
+                if not link.key:
+                    link.register(client)
+                fast = link.protocol >= 2
+                if not fast:
+                    drain(batch)
+                path = "poll?wait=8" if fast else "poll"
+                response = link.post(client, path, link.payload(link.key, batch))
+                if response.status_code in {401, 403}:
+                    link.reconnect.set()
+                    continue
+                if not response.ok:
+                    raise RuntimeError(f"Connector poll returned HTTP {response.status_code}.")
+                batch.clear()
+                for command in response.json()["commands"]:
+                    dispatch(command)
+                if not fast:
+                    time.sleep(.25 if TERMINALS else 1.1)
+            except (requests.RequestException, RuntimeError, ValueError, KeyError) as failure:
+                print(failure, file=sys.stderr, flush=True)
+                time.sleep(3)
+
+
+ready = False
+detail = "Preparing Herdr and updating the agent CLIs."
+if __name__ == "__main__":
+    Thread(target=prepare, daemon=True).start()
+    run()
