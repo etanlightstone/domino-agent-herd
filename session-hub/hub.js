@@ -664,13 +664,46 @@ function openTerminal(channel, label) {
     cursorBlink: true, fontSize: 13, convertEol: false, scrollback: 3000, theme: terminalTheme()
   });
   const fit = new FitAddon.FitAddon();
-  const session = {channel, label, view, sequence: 0, sending: Promise.resolve(), poll: new AbortController()};
+  const session = {channel, label, view, sequence: 0, poll: new AbortController()};
+  // One request in flight at a time keeps ordering, but while it is out, queued keystrokes/scrolls are
+  // merged so a slow round trip doesn't build a backlog (which made typing lag and scrolling overshoot).
+  const queue = [];
+  let flushing = false;
   function send(action) {
-    session.sending = session.sending.then(() =>
-      terminal === session ? api('terminals/' + channel, action) : undefined
-    ).catch(error => {
-      if (terminal === session) agentNotice(error.message, true);
-    });
+    const last = queue[queue.length - 1];
+    if (last && last.type === action.type) {
+      if (action.type === 'terminal.input') { last.text += action.text; return flush(); }
+      if (action.type === 'terminal.resize') { Object.assign(last, action); return flush(); }
+      if (action.type === 'terminal.scroll' && last.direction === action.direction &&
+          last.column === action.column && last.row === action.row) {
+        last.lines = Math.min(200, last.lines + action.lines);
+        return flush();
+      }
+    }
+    queue.push({...action});
+    flush();
+  }
+  async function flush() {
+    if (flushing) return;
+    flushing = true;
+    try {
+      while (queue.length && terminal === session) {
+        const {text, ...action} = queue.shift();
+        try {
+          if (action.type !== 'terminal.input') {
+            await api('terminals/' + channel, action);
+            continue;
+          }
+          for (let pos = 0; pos < text.length; pos += 8000) {
+            await api('terminals/' + channel, {type: action.type, bytes: encodeInput(text.slice(pos, pos + 8000))});
+          }
+        } catch (error) {
+          if (terminal === session) agentNotice(error.message, true);
+        }
+      }
+    } finally {
+      flushing = false;
+    }
   }
   terminal = session;
   view.loadAddon(fit);
@@ -678,9 +711,7 @@ function openTerminal(channel, label) {
   panel.hidden = false;
   view.open(mount);
   view.onData(value => {
-    for (let pos = 0; pos < value.length; pos += 8000) {
-      send({type: 'terminal.input', bytes: encodeInput(value.slice(pos, pos + 8000))});
-    }
+    send({type: 'terminal.input', text: value});
   });
   view.onResize(({cols, rows}) => send({
     type: 'terminal.resize', cols: Math.max(10, Math.min(350, cols)), rows: Math.max(4, Math.min(140, rows))
