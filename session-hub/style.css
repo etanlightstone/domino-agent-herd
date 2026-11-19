@@ -58,7 +58,8 @@ button:disabled { opacity: .5; cursor: default; }
 .primary:hover { color: white; background: var(--accent-hover); border-color: var(--accent-hover); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .workspace-tabs, .agent-tabs { display: flex; gap: 4px; align-items: stretch; min-width: 0; overflow-x: auto; padding: 2px; scrollbar-width: thin; }
-.workspace-tabs { border-bottom: 1px solid var(--border); margin-bottom: 7px; gap: 6px; }
+.workspace-tab-bar { display: flex; align-items: center; gap: 8px; min-height: 40px; border-bottom: 1px solid var(--border); margin-bottom: 7px; }
+.workspace-tabs { flex: 1; gap: 6px; }
 .workspace-tab, .agent-tab { flex: 0 0 auto; border-color: transparent; background: transparent; }
 .workspace-tab { padding: 9px 13px; border-radius: 5px 5px 0 0; max-width: 340px; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .workspace-tab[aria-selected=true], .agent-tab[aria-selected=true] { color: var(--accent-text); background: var(--selection); border-color: var(--border); }
@@ -105,6 +106,27 @@ button:disabled { opacity: .5; cursor: default; }
 #ide-frame iframe { height: 100%; width: 100%; border: 0; display: block; }
 dialog { color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; width: min(650px, calc(100vw - 24px)); }
 dialog::backdrop { background: #18172080; }
+.block-drop-launch { display: grid; place-items: center; flex: none; width: 32px; height: 32px; padding: 0; color: var(--accent-text); background: transparent; border-color: transparent; border-radius: 7px; }
+.block-drop-launch:hover { background: var(--selection); border-color: var(--border); }
+.block-drop-icon { display: grid; grid-template-columns: repeat(3, 5px); grid-auto-rows: 5px; gap: 1px; }
+.block-drop-icon i { background: currentColor; border-radius: 1px; }
+.block-drop-icon i:first-child { grid-column: 2; opacity: .7; }
+.block-drop-icon i:nth-child(2) { grid-column: 1; grid-row: 2; }
+.block-drop { width: min(400px, calc(100vw - 24px)); padding: 16px; border-radius: 12px; }
+.block-drop-game { display: grid; grid-template-columns: minmax(0, 1fr) minmax(86px, 94px); gap: 12px; align-items: start; }
+.block-drop canvas { display: block; }
+#block-drop-board { width: min(100%, 240px, max(110px, (100dvh - 140px) / 2)); height: auto; justify-self: center; background: #171623; border-radius: 6px; }
+.block-drop-sidebar { display: grid; gap: 7px; }
+.block-drop-stats { margin: 0; font-variant-numeric: tabular-nums; }
+.block-drop-stats div { display: flex; justify-content: space-between; gap: 4px; }
+.block-drop-stats dt, .block-drop-previews { color: var(--muted); font-size: .82rem; }
+.block-drop-stats dd { margin: 0; font-weight: 650; }
+.block-drop-previews { display: grid; gap: 5px; }
+.block-drop-previews canvas { width: 100%; height: 38px; object-fit: contain; background: #171623; border-radius: 5px; }
+#block-drop-status { min-height: 1.5em; margin: 0; font-size: .82rem; }
+.block-drop-keys { display: flex; flex-wrap: wrap; gap: 6px 11px; margin-top: 12px; color: var(--muted); font-size: .8rem; }
+.block-drop-keys span { white-space: nowrap; }
+.block-drop-keys kbd { padding: 1px 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--hover); color: var(--ink); }
 .wide-dialog { width: min(930px, calc(100vw - 24px)); }
 .dialog-heading { margin-bottom: 14px; }
 dialog form { display: grid; gap: 12px; margin-top: 14px; }

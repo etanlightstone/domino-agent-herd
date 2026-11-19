@@ -791,7 +791,7 @@ def workspace_git(pid, wid):
     if not broker.status(run)["connected"]:
         return jsonify(state="disabled", detail="Git sync needs a connected workspace.")
     operation = "git_sync" if sync else "git_status"
-    return jsonify(broker.call(run, operation, timeout=65, require_ready=False))
+    return jsonify(broker.call(run, operation, timeout=110 if sync else 65, require_ready=False))
 
 
 @app.get("/api/projects/<pid>/workspaces/<wid>/agents")

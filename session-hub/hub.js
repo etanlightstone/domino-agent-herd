@@ -497,7 +497,7 @@ async function requestGit(view, sync) {
   const {workspace} = view;
   try {
     return await api(`projects/${workspace.projectId}/workspaces/${workspace.id}/git`,
-      sync ? {run: workspace.run} : undefined, AbortSignal.timeout(85000));
+      sync ? {run: workspace.run} : undefined, AbortSignal.timeout(sync ? 125000 : 85000));
   } catch (error) {
     let detail = error.message;
     if (error.name === 'TimeoutError') detail = 'The workspace took too long to respond.';
@@ -513,12 +513,7 @@ async function refreshGit() {
   view.check = requestGit(view, false);
   const status = await view.check;
   view.check = undefined;
-  if (view === gitView && !view.syncing) showGitStatus(status);
-}
-
-function showGitStatus(status) {
-  const {state, detail} = status;
-  renderGit({state, detail: state === 'error' ? `${detail} Click Sync Git to try again.` : detail});
+  if (view === gitView && !view.syncing) renderGit(status);
 }
 
 byId('git-sync').addEventListener('click', async () => {
@@ -532,7 +527,7 @@ byId('git-sync').addEventListener('click', async () => {
   const status = await requestGit(view, true);
   if (view !== gitView) return;
   view.syncing = false;
-  showGitStatus(status);
+  renderGit(status);
   gitFeedback(status.synced ? 'Git is up to date.' : status.detail, status.state === 'error');
   if (status.state === 'busy') setTimeout(refreshGit, 1500);
 });

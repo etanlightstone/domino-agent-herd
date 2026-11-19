@@ -9,6 +9,7 @@
 <script src="./assets/xterm.js" defer></script>
 <script src="./assets/xterm-fit.js" defer></script>
 <script src="./assets/hub.js" defer></script>
+<script src="./assets/block-drop.js" defer></script>
 </head>
 <body>
 <header class="top">
@@ -21,7 +22,12 @@
   </div>
 </header>
 <main>
-  <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Running workspaces"></div>
+  <div class="workspace-tab-bar">
+    <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Running workspaces"></div>
+    <button id="block-drop-open" class="block-drop-launch" type="button" aria-label="Play Block Drop" aria-haspopup="dialog" title="Play Block Drop">
+      <span class="block-drop-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    </button>
+  </div>
   <p id="status" role="status">Loading workspaces…</p>
   <div id="connector-setup-banner" class="setup-banner" hidden>
     <span id="connector-setup-status" role="status"></span>
@@ -120,5 +126,37 @@
   </div>
 </dialog>
 <dialog id="dialog"><div id="dialog-body"></div><form method="dialog"><button>Close</button></form></dialog>
+<dialog id="block-drop" class="block-drop" aria-labelledby="block-drop-title">
+  <div class="dialog-heading">
+    <h2 id="block-drop-title">Block Drop</h2>
+    <form method="dialog"><button>Close</button></form>
+  </div>
+  <div class="block-drop-game">
+    <canvas id="block-drop-board" width="240" height="480" tabindex="0" autofocus
+      aria-label="Falling blocks board" aria-describedby="block-drop-keys"></canvas>
+    <div class="block-drop-sidebar">
+      <dl class="block-drop-stats">
+        <div><dt>Score</dt><dd id="block-drop-score">0</dd></div>
+        <div><dt>Lines</dt><dd id="block-drop-lines">0</dd></div>
+        <div><dt>Level</dt><dd id="block-drop-level">1</dd></div>
+      </dl>
+      <div class="block-drop-previews">
+        <div>Next <canvas id="block-drop-next" width="80" height="48" aria-label="Next piece"></canvas></div>
+        <div>Hold <canvas id="block-drop-held" width="80" height="48" aria-label="Held piece"></canvas></div>
+      </div>
+      <p id="block-drop-status" role="status"></p>
+      <button id="block-drop-pause" type="button">Pause</button>
+      <button id="block-drop-restart" type="button">New game</button>
+    </div>
+  </div>
+  <div id="block-drop-keys" class="block-drop-keys">
+    <span><kbd>←</kbd> <kbd>→</kbd> Move</span>
+    <span><kbd>↑</kbd> Rotate</span>
+    <span><kbd>↓</kbd> Soft drop</span>
+    <span><kbd>Space</kbd> Hard drop</span>
+    <span><kbd>C</kbd> Hold</span>
+    <span><kbd>P</kbd> Pause</span>
+  </div>
+</dialog>
 </body>
 </html>

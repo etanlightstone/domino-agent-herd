@@ -35,8 +35,9 @@ VSCODE_SETTINGS = Lock()
 GIT_SYNC = Lock()
 HERDR = ["herdr", "--session", "domino-hub"]
 AGENT_FLAGS = {
-    "codex": "--yolo",
-    "claude": "--dangerously-skip-permissions",
+    # Give session hooks the current pane's environment instead of the daemon's startup environment.
+    "codex": ("--no-daemon", "--yolo"),
+    "claude": ("--dangerously-skip-permissions",),
 }
 ENTRY = re.compile(r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
 os.environ["PATH"] = str(Path.home() / ".local/bin") + ":" + os.environ["PATH"]
@@ -56,23 +57,27 @@ def agent_restore_environment():
     # Give this Herdr server its own launchers and leave each workspace's CLI installs intact.
     directory = Path.home() / ".cache/domino-herdr/agent-bin"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for kind, flag in AGENT_FLAGS.items():
+    for kind, flags in AGENT_FLAGS.items():
         executable = shutil.which(kind)
         target = directory / kind
         if not executable:
             target.unlink(missing_ok=True)
             continue
         command = shlex.quote(executable)
-        option = shlex.quote(flag)
-        script = f"""#!/bin/sh
-unset NO_COLOR
+        script = "#!/bin/sh\nunset NO_COLOR\n"
+        for flag in reversed(flags):
+            option = shlex.quote(flag)
+            script += f"""arg=
 for arg in "$@"; do
   if [ "$arg" = {option} ]; then
-    exec {command} "$@"
+    break
   fi
 done
-exec {command} {option} "$@"
+if [ "$arg" != {option} ]; then
+  set -- {option} "$@"
+fi
 """
+        script += f'exec {command} "$@"\n'
         with NamedTemporaryFile(dir=directory, mode="w", delete=False) as launcher:
             candidate = Path(launcher.name)
             try:
@@ -327,7 +332,7 @@ def launch(kind, conversation):
         if not saved:
             raise RuntimeError("This conversation is no longer available in the workspace.")
         cwd = saved["cwd"]
-    agent = [kind, AGENT_FLAGS[kind]]
+    agent = [kind, *AGENT_FLAGS[kind]]
     if conversation:
         agent.extend(["resume", conversation] if kind == "codex" else ["--resume", conversation])
     elif kind == "claude":
@@ -511,17 +516,21 @@ def git(*args, timeout=5):
 
 
 def git_worktree_status():
-    operation_paths = git("rev-parse", "--git-path", "MERGE_HEAD", "--git-path", "rebase-merge",
-                          "--git-path", "rebase-apply", "--git-path", "CHERRY_PICK_HEAD",
-                          "--git-path", "REVERT_HEAD", "--git-path", "sequencer",
-                          "--git-path", "BISECT_START").splitlines()
+    rebase_merge, rebase_apply, *operation_paths = git(
+        "rev-parse", "--git-path", "rebase-merge", "--git-path", "rebase-apply",
+        "--git-path", "MERGE_HEAD", "--git-path", "CHERRY_PICK_HEAD",
+        "--git-path", "REVERT_HEAD", "--git-path", "sequencer", "--git-path", "BISECT_START",
+    ).splitlines()
+    # git am also uses rebase-apply, but it needs git am --continue or --abort.
+    if (CODE_ROOT / rebase_merge).is_dir() or (CODE_ROOT / rebase_apply / "rebasing").exists():
+        return {"state": "error", "detail": "A Git rebase is in progress. Resolve the conflicts and run git rebase --continue, or run git rebase --abort to return to your local commits. Then sync again."}
     changes = git("--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal").splitlines()
-    if any((CODE_ROOT / name).exists() for name in operation_paths) or any(
+    if any((CODE_ROOT / name).exists() for name in [rebase_apply, *operation_paths]) or any(
         line[:2] in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"} for line in changes
     ):
         return {"state": "error", "detail": "Finish the Git operation or resolve the conflicts in the workspace first."}
     if changes:
-        return {"state": "dirty", "detail": "You have uncommitted changes. Sync Git checks again. Commit or stash your changes before syncing."}
+        return {"state": "dirty", "detail": "Sync Git will commit your changes and any new, non-ignored files, then sync the branch."}
     return None
 
 
@@ -532,7 +541,7 @@ def workspace_git(sync):
         if not (CODE_ROOT / ".git").exists():
             return {"state": "error", "detail": "The project’s Git checkout is missing from this workspace."}
         status = git_worktree_status()
-        if status:
+        if status and (not sync or status["state"] == "error"):
             return status
         try:
             branch = git("symbolic-ref", "--quiet", "HEAD")
@@ -544,6 +553,15 @@ def workspace_git(sync):
             return {"state": "error", "detail": "This branch has no remote branch set up for syncing. Set an upstream branch in the workspace."}
         upstream, remote, remote_branch = tracking
         head = git("rev-parse", "HEAD")
+        if status:
+            try:
+                git("add", "--all", timeout=10)
+                if git("symbolic-ref", "--quiet", "HEAD") != branch or git("rev-parse", "HEAD") != head:
+                    return {"state": "busy", "detail": "The workspace branch changed while staging. Check the staged files and try again."}
+                git("commit", "-m", "Sync workspace changes", timeout=15)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return {"state": "error", "detail": "Git could not commit the workspace changes. Check git status, your Git identity, and any commit hooks."}
+            head = git("rev-parse", "HEAD")
         try:
             git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
                 "--", remote, f"+{remote_branch}:{upstream}", timeout=20)
@@ -556,29 +574,43 @@ def workspace_git(sync):
         ahead, behind = map(int, git("rev-list", "--left-right", "--count", f"{head}...{tip}").split())
         if git("symbolic-ref", "--quiet", "HEAD") != branch or git("rev-parse", "HEAD") != head:
             return {"state": "busy", "detail": "The workspace branch changed during the check. Try again."}
+        if not sync:
+            if ahead and behind:
+                return {"state": "dirty", "detail": "Both branches have new commits. Sync Git will rebase your local commits onto the remote branch, then push."}
+            if behind:
+                return {"state": "dirty", "detail": "The remote branch has new commits. Sync Git pulls them into this workspace."}
+            if ahead:
+                return {"state": "dirty", "detail": "You have local commits to push. Sync Git sends them to the remote branch."}
+            return {"state": "clean", "detail": "Your branch is up to date. Sync Git checks for new commits to pull or push.", "synced": False}
         if ahead and behind:
-            return {"state": "error", "detail": "This branch and its remote both have new commits. Merge or rebase in the workspace before syncing."}
-        if sync and behind:
+            try:
+                git("merge-base", head, tip)
+                git("-c", "rebase.updateRefs=false", "rebase", "--no-autostash", "--no-autosquash",
+                    "--rebase-merges", tip, timeout=25)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                status = git_worktree_status()
+                return status or {"state": "error", "detail": "Git could not rebase your local commits onto the remote branch. Check the branch in the workspace before syncing again."}
+            head = git("rev-parse", "HEAD")
+        elif behind:
             try:
                 git("-c", "submodule.recurse=false", "merge", "--ff-only", "--no-autostash", tip, timeout=25)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 return {"state": "error", "detail": "Git could not pull the remote commits. Check the branch and files in the workspace."}
-        if sync and ahead:
+        status = git_worktree_status()
+        if status:
+            return status
+        if ahead and head != tip:
+            if git("symbolic-ref", "--quiet", "HEAD") != branch or git("rev-parse", "HEAD") != head:
+                return {"state": "busy", "detail": "The workspace branch changed before the push. Try again."}
             try:
                 git("-c", "push.followTags=false", "push", "--recurse-submodules=no",
                     "--", remote, f"{head}:{remote_branch}", timeout=25)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 return {"state": "error", "detail": "Git could not push your commits. Check remote access and branch permissions, then try again."}
-        if sync:
             status = git_worktree_status()
             if status:
                 return status
-        elif behind:
-            return {"state": "dirty", "detail": "The remote branch has new commits. Sync Git pulls them into this workspace."}
-        elif ahead:
-            return {"state": "dirty", "detail": "You have local commits to push. Sync Git sends them to the remote branch."}
-        return {"state": "clean", "detail": "Your branch is up to date. Sync Git checks for new commits to pull or push.",
-                "synced": sync}
+        return {"state": "clean", "detail": "Git is up to date.", "synced": True}
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return {"state": "error", "detail": "Could not check Git in this workspace. Open the workspace to check the repository."}
     finally:
