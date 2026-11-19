@@ -334,7 +334,9 @@ def launch(kind, conversation):
         herdr("workspace", "create", "--cwd", str(ROOT), "--label", "Workspace Sessions")
     title = saved["label"] if saved else label
     pane = herdr("tab", "create", "--cwd", cwd, "--label", label)["root_pane"]["pane_id"]
-    process = subprocess.run([*HERDR, "pane", "run", pane, "env", "-u", "NO_COLOR", "--", *agent], timeout=10,
+    # Claude Code otherwise opens file diffs in the workspace IDE's side panel.
+    extra_env = ["CLAUDE_CODE_AUTO_CONNECT_IDE=false"] if kind == "claude" else []
+    process = subprocess.run([*HERDR, "pane", "run", pane, "env", "-u", "NO_COLOR", "--", *extra_env, *agent], timeout=10,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if process.returncode:
         raise RuntimeError("Herdr could not start the CLI in this workspace.")

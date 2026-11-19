@@ -175,9 +175,45 @@ function renderWorkspaceTabs() {
     tab.setAttribute('aria-selected', String(workspace.id === agentWorkspace?.id));
     tab.disabled = !workspace.running;
     if (tab.disabled) tab.textContent += ' · Starting';
+    const state = workspaceAgentState(workspace);
+    if (state) {
+      const dot = element('span', '', 'agent-dot');
+      dot.dataset.state = state;
+      tab.append(dot);
+      tab.title = `${workspace.name} · ${state}`;
+    }
     return tab;
   }));
 }
+
+const otherAgents = new Map();
+const STATE_RANK = {blocked: 3, working: 2, starting: 2, done: 1, idle: 1};
+
+function workspaceAgentState(workspace) {
+  const agents = workspace.id === agentWorkspace?.id ? runningAgents : otherAgents.get(workspace.id) || [];
+  let best;
+  for (const agent of agents) {
+    const state = agent.status?.toLowerCase();
+    if ((STATE_RANK[state] || 0) > (STATE_RANK[best] || 0)) best = state;
+  }
+  return best;
+}
+
+async function pollOtherWorkspaces() {
+  const running = data?.workspaces.filter(workspace => workspace.running && workspace.connector?.ready &&
+    workspace.id !== agentWorkspace?.id) || [];
+  for (const id of [...otherAgents.keys()]) if (!running.some(workspace => workspace.id === id)) otherAgents.delete(id);
+  await Promise.all(running.map(async workspace => {
+    try {
+      const list = await api(agentPath(workspace) + '?live=1');
+      otherAgents.set(workspace.id, list.running || []);
+    } catch {
+      otherAgents.delete(workspace.id);
+    }
+  }));
+  if (data) renderWorkspaceTabs();
+}
+setInterval(() => { if (!document.hidden) pollOtherWorkspaces(); }, 5000);
 
 function browseProjects() {
   if (projectsDialog.open) return;
@@ -434,7 +470,7 @@ async function loadAgents(workspace) {
         !byId('agent-controls').querySelector('#new-codex')) {
       const codex = button('New Codex', () => launchAgent({kind: 'codex'}), 'primary');
       codex.id = 'new-codex';
-      const claude = button('New Claude Code', () => launchAgent({kind: 'claude'}));
+      const claude = button('New Claude Code', () => launchAgent({kind: 'claude'}), 'primary');
       claude.id = 'new-claude';
       byId('agent-controls').dataset.workspace = workspaceKey(workspace);
       byId('agent-controls').replaceChildren(codex, claude, button('History', openHistory));
@@ -442,6 +478,7 @@ async function loadAgents(workspace) {
     if (!activeStart && !byId('agent-summary').classList.contains('error')) agentNotice(list.detail || '');
     runningAgents = list.running;
     renderAgentTabs();
+    renderWorkspaceTabs();
     const empty = byId('agent-empty');
     empty.hidden = Boolean(terminal) || Boolean(selectedPane);
     empty.textContent = runningAgents.length ? 'Choose an agent tab to attach.' :
@@ -583,6 +620,23 @@ function openTerminal(channel, label) {
     type: 'terminal.resize', cols: Math.max(10, Math.min(350, cols)), rows: Math.max(4, Math.min(140, rows))
   }));
   session.fit = fit;
+  // Herdr keeps the scrollback, so wheel events scroll the pane there instead of xterm's own buffer.
+  let wheelLines = 0;
+  let wheelTimer;
+  session.wheel = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const step = event.deltaMode === 1 ? 1 : event.deltaMode === 2 ? view.rows : 17;
+    wheelLines += event.deltaY / step;
+    wheelTimer ??= setTimeout(() => {
+      wheelTimer = undefined;
+      const lines = Math.min(200, Math.round(Math.abs(wheelLines)));
+      const direction = wheelLines < 0 ? 'up' : 'down';
+      wheelLines = 0;
+      if (lines) send({type: 'terminal.scroll', direction, lines});
+    }, 40);
+  };
+  mount.addEventListener('wheel', session.wheel, {capture: true, passive: false});
   session.resize = new ResizeObserver(() => { if (visibleView === 'agent') fit.fit(); });
   session.resize.observe(mount);
   fit.fit();
@@ -626,6 +680,7 @@ function detachTerminal() {
   terminal = null;
   session.poll.abort();
   session.resize.disconnect();
+  byId('terminal').removeEventListener('wheel', session.wheel, {capture: true});
   session.view.dispose();
   byId('terminal-panel').hidden = true;
   byId('terminal').replaceChildren();

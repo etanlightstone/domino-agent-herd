@@ -740,6 +740,11 @@ def terminal_input(channel):
         if type(cols) is not int or type(rows) is not int or not 10 <= cols <= 350 or not 4 <= rows <= 140:
             abort(400, "Invalid terminal size.")
         action = {"type": kind, "cols": cols, "rows": rows}
+    elif kind == "terminal.scroll":
+        direction, lines = action.get("direction"), action.get("lines")
+        if direction not in ("up", "down") or type(lines) is not int or not 1 <= lines <= 200:
+            abort(400, "Invalid terminal scroll.")
+        action = {"type": kind, "direction": direction, "lines": lines}
     elif kind == "terminal.release":
         action = {"type": kind}
     else:
