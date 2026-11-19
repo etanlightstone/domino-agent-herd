@@ -95,24 +95,27 @@ class Broker:
             worker.seen = monotonic()
             return [worker.commands.popleft() for _ in range(min(100, len(worker.commands)))]
 
-    def require_worker(self, run):
+    def require_worker(self, run, *, require_ready=True):
         self.prune()
         worker = self.workspaces.get(run)
-        if not worker or not worker.ready:
+        if not worker or (require_ready and not worker.ready):
             abort(409, (worker.detail if worker else None) or "The workspace connector is unavailable.")
         return worker
 
-    def call(self, run, operation, **values):
+    def call(self, run, operation, *, timeout=22, require_ready=True, **values):
         with self.changed:
-            worker = self.require_worker(run)
+            worker = self.require_worker(run, require_ready=require_ready)
             if len(worker.commands) >= 128:
                 abort(429, "The workspace is busy. Try again shortly.")
             tag = token_urlsafe(12)
             worker.replies[tag] = None
-            worker.commands.append({"operation": operation, "request": tag, **values})
+            command = {"operation": operation, "request": tag, **values}
+            worker.commands.append(command)
             self.changed.notify_all()
             try:
-                if not self.changed.wait_for(lambda: worker.replies[tag] is not None, timeout=22):
+                if not self.changed.wait_for(lambda: worker.replies[tag] is not None, timeout=timeout):
+                    if command in worker.commands:
+                        worker.commands.remove(command)
                     abort(504, "The workspace did not respond. Reopen the session to retry.")
                 reply = worker.replies[tag]
                 if reply.get("error"):

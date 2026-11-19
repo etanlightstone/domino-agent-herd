@@ -28,6 +28,7 @@ HISTORY_CACHE = (0, [])
 RUNNING_LABELS = {}
 EVENTS = Queue(maxsize=100)
 MANAGE = Lock()
+VSCODE_SETTINGS = Lock()
 HERDR = ["herdr", "--session", "domino-hub"]
 AGENT_FLAGS = {
     "codex": "--yolo",
@@ -391,23 +392,105 @@ def terminal_input(channel, action):
             pass
 
 
+def update_jsonc_settings(source, updates):
+    # Mask comments and trailing commas so decoded values still point into the original file.
+    tokens = re.compile(r'"(?:\\.|[^"\\])*"|//[^\r\n]*|/\*[\s\S]*?\*/')
+    masked = tokens.sub(
+        lambda token: re.sub(r"[^\r\n]", " ", token[0]) if token[0].startswith("/") else token[0],
+        source,
+    )
+    masked = re.sub(r'"(?:\\.|[^"\\])*"|,(?=\s*[}\]])',
+                    lambda token: " " if token[0] == "," else token[0], masked)
+    settings = json.loads(masked)
+    if not isinstance(settings, dict):
+        raise ValueError("VS Code settings must contain an object.")
+
+    remaining = dict(updates)
+    edits = []
+    decoder = json.JSONDecoder()
+    whitespace = re.compile(r"\s*")
+    separator = re.compile(r"\s*:\s*")
+    start = masked.index("{") + 1
+    index = whitespace.match(masked, start).end()
+    while masked[index] != "}":
+        key, end = decoder.raw_decode(masked, index)
+        value_start = separator.match(masked, end).end()
+        value, index = decoder.raw_decode(masked, value_start)
+        if key in updates and value != updates[key]:
+            edits.append((value_start, index, json.dumps(updates[key])))
+        remaining.pop(key, None)
+        index = whitespace.match(masked, index).end()
+        if masked[index] == ",":
+            index = whitespace.match(masked, index + 1).end()
+
+    for first, last, value in reversed(edits):
+        source = source[:first] + value + source[last:]
+    if remaining:
+        newline = "\r\n" if "\r\n" in source else "\n"
+        fields = ("," + newline).join(f"    {json.dumps(key)}: {json.dumps(value)}"
+                                       for key, value in remaining.items())
+        suffix = "," if settings else ""
+        if not source[start:].startswith(("\n", "\r\n")):
+            suffix += newline
+        source = source[:start] + newline + fields + suffix + source[start:]
+    return source
+
+
+def set_vscode_theme(theme):
+    themes = {"dark": "Dark Modern", "light": "Light Modern"}
+    if theme not in themes:
+        raise RuntimeError("Choose a light or dark VS Code theme.")
+    # Domino's VS Code launcher starts code-server with --user-data-dir "$HOME/.vscode".
+    path = Path.home() / ".vscode/Machine/settings.json"
+    with VSCODE_SETTINGS:
+        try:
+            source = path.read_bytes().decode("utf-8-sig")
+        except FileNotFoundError:
+            source = "{\n}\n"
+        try:
+            updated = update_jsonc_settings(source, {
+                "workbench.colorTheme": themes[theme],
+                "window.autoDetectColorScheme": False,
+            })
+        except ValueError as error:
+            raise RuntimeError("VS Code remote settings contain invalid JSON.") from error
+        if updated == source:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=path.parent, delete=False) as settings:
+            candidate = Path(settings.name)
+            try:
+                settings.write(updated.encode("utf-8"))
+                settings.close()
+                candidate.replace(path)
+            finally:
+                candidate.unlink(missing_ok=True)
+
+
 def handle(command):
     operation = command["operation"]
     tag = command.get("request")
     try:
-        with MANAGE:
-            if operation == "inventory":
-                value = inventory(include_history=command.get("include_history", True))
-            elif operation == "launch":
-                value = launch(command["kind"], command.get("conversation"))
-            elif operation == "attach":
-                attach(command["pane"], command["channel"])
-                value = True
-            else:
-                raise RuntimeError("Unknown connector action.")
+        if operation == "vscode_theme":
+            set_vscode_theme(command["theme"])
+            value = True
+        else:
+            value = handle_agent_action(operation, command)
         EVENTS.put({"request": tag, "value": value})
     except (RuntimeError, OSError, subprocess.TimeoutExpired, KeyError) as error:
         EVENTS.put({"request": tag, "error": str(error)})
+
+
+def handle_agent_action(operation, command):
+    with MANAGE:
+        if operation == "inventory":
+            return inventory(include_history=command.get("include_history", True))
+        if operation == "launch":
+            return launch(command["kind"], command.get("conversation"))
+        if operation == "attach":
+            attach(command["pane"], command["channel"])
+            return True
+        raise RuntimeError("Unknown connector action.")
 
 
 def prepare():

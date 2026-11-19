@@ -608,13 +608,18 @@ def connector_poll():
     return jsonify(commands=broker.poll(run, key, data, commands=commands, wait=wait))
 
 
-def running_workspace(pid, wid):
+def require_running_workspace(pid, wid):
     workspace = domino(workspace_path(pid, wid))
     session = workspace.get("mostRecentSession") or {}
     if workspace["ownerName"] != owner or workspace["deleted"]:
         abort(403, "Only your workspaces are available in this app.")
     if not (session.get("sessionStatusInfo") or {}).get("isRunning"):
         abort(409, "Start or resume the workspace before opening its agent sessions.")
+    return workspace, session
+
+
+def running_workspace(pid, wid):
+    _, session = require_running_workspace(pid, wid)
     return session["executionId"]
 
 
@@ -683,6 +688,19 @@ def workspace_ide(pid, wid):
         except requests.RequestException:
             pass
     return jsonify(url=url, embed=allowed)
+
+
+@app.post("/api/projects/<pid>/workspaces/<wid>/ide/theme")
+def workspace_ide_theme(pid, wid):
+    theme = body().get("theme")
+    if theme not in ("light", "dark"):
+        abort(400, "Choose a light or dark VS Code theme.")
+    workspace, session = require_running_workspace(pid, wid)
+    config = session.get("config") or workspace.get("configTemplate") or {}
+    if next(iter(config.get("tools") or []), None) != "vscode":
+        abort(409, "This workspace IDE is not VS Code.")
+    broker.call(session["executionId"], "vscode_theme", theme=theme, timeout=5, require_ready=False)
+    return jsonify(applied=True)
 
 
 @app.get("/api/projects/<pid>/workspaces/<wid>/agents")

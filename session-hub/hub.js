@@ -35,6 +35,37 @@ function link(text, url, className) {
   return node;
 }
 
+async function applyWorkspaceIDETheme(workspace) {
+  if (workspace.tool !== 'vscode' || !workspace.connector?.connected) return;
+  const theme = document.documentElement.dataset.theme;
+  try {
+    await api(`projects/${workspace.projectId}/workspaces/${workspace.id}/ide/theme`,
+      {theme}, AbortSignal.timeout(7000));
+  } catch {
+    // The IDE can still open if its connector cannot apply the theme.
+  }
+}
+
+function workspaceIDELink(workspace, text, url, className) {
+  const node = link(text, url, className);
+  if (workspace.tool === 'vscode') {
+    const open = async event => {
+      if (event.defaultPrevented || !workspace.connector?.connected) return;
+      const tab = window.open('about:blank', '_blank');
+      if (!tab) return;
+      event.preventDefault();
+      tab.opener = null;
+      await applyWorkspaceIDETheme(workspace);
+      if (!tab.closed) tab.location.replace(node.href);
+    };
+    node.addEventListener('click', open);
+    node.addEventListener('auxclick', event => {
+      if (event.button === 1) open(event);
+    });
+  }
+  return node;
+}
+
 function notice(message, error = false) {
   byId('status').textContent = message;
   byId('status').dataset.error = error;
@@ -43,7 +74,7 @@ function notice(message, error = false) {
 
 async function api(path, body, signal) {
   const options = body === undefined ? {signal} : {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body), signal
   };
   const response = await fetch('./api/' + path, options);
   const result = await response.json().catch(() => ({}));
@@ -275,7 +306,7 @@ function row(workspace) {
   if (workspace.running || workspace.projectId !== selected) label.append(element('div', workspace.name, 'meta'));
   const controls = element('div', '', 'actions');
   if (workspace.running && !transition) {
-    controls.append(link('Open workspace', workspace.ide, 'button'),
+    controls.append(workspaceIDELink(workspace, 'Open workspace', workspace.ide, 'button'),
       button('Open sessions', () => {
         projectsDialog.close();
         showAgents(workspace);
@@ -369,7 +400,7 @@ function showAgentTerminal() {
 async function loadWorkspaceIDE(workspace) {
   const label = workspace.tool === 'vscode' ? 'VS Code' : 'Open IDE';
   const url = `./workspaces/${workspace.projectId}/${workspace.id}/ide`;
-  const fallback = link(label, url, 'button ide-link');
+  const fallback = workspaceIDELink(workspace, label, url, 'button ide-link');
   fallback.title = 'Open the workspace IDE in a browser tab';
   byId('workspace-ide').replaceChildren(fallback);
   try {
@@ -379,21 +410,23 @@ async function loadWorkspaceIDE(workspace) {
       fallback.href = info.url;
       return;
     }
-    const openIDE = button(label, () => {
+    const openIDE = button(label, async () => {
       visibleView = 'ide';
       byId('agent-view').hidden = true;
       byId('ide-panel').hidden = false;
       byId('ide-title').textContent = label;
-      byId('ide-actions').replaceChildren(link('Open in browser tab', info.url, 'button'),
+      byId('ide-actions').replaceChildren(workspaceIDELink(workspace, 'Open in browser tab', info.url, 'button'),
         button('Back to agents', showAgentTerminal));
-      if (!byId('ide-frame').firstChild) {
-        const frame = element('iframe');
-        frame.title = `${label} · ${workspace.project}`;
-        frame.src = info.url;
-        byId('ide-frame').append(frame);
-      }
       openIDE.setAttribute('aria-selected', 'true');
       renderAgentTabs();
+      let frame = byId('ide-frame').firstChild;
+      if (!frame) {
+        frame = element('iframe');
+        frame.title = `${label} · ${workspace.project}`;
+        byId('ide-frame').append(frame);
+      }
+      await applyWorkspaceIDETheme(workspace);
+      if (frame.isConnected && !frame.hasAttribute('src')) frame.src = info.url;
     }, 'agent-tab ide-link');
     openIDE.setAttribute('role', 'tab');
     openIDE.setAttribute('aria-controls', 'ide-panel');
@@ -451,6 +484,7 @@ async function loadAgents(workspace) {
   try {
     const list = await api(agentPath(workspace) + '?live=1');
     if (agentWorkspace !== workspace || load !== loadNumber) return;
+    workspace.connector.connected = list.connected;
     if (!list.ready) {
       byId('agent-controls').replaceChildren();
       if (!list.connected && workspace.canEnable && data.managedAvailable) {
