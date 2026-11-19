@@ -17,22 +17,35 @@ cache = Path(sys.argv[1])
 app_url = sys.argv[2].rstrip("/") + "/"
 if not app_url.startswith("https://"):
     raise SystemExit("Set SESSION_HUB_APP_URL to the private Domino App's HTTPS URL.")
+last_failure = None
 for attempt in range(30):
+    stage = "Requesting a Domino workspace token"
     try:
-        token = requests.get("http://127.0.0.1:8899/access-token", timeout=5)
-        token.raise_for_status()
-        headers = {"Authorization": "Bearer " + token.text.strip()}
+        identity = requests.get("http://127.0.0.1:8899/access-token", timeout=5)
+        identity.raise_for_status()
+        token = identity.text.strip()
+        headers = {"Authorization": "Bearer " + token}
         for name in ("session_hub_agent.py", "herdr-workspace.sh"):
+            stage = f"Downloading {name} from the published App"
             url = app_url + "api/connector/files/" + name
-            response = requests.get(url, headers=headers, timeout=15, allow_redirects=False)
+            response = requests.post(url, headers=headers, json={"token": token}, timeout=15, allow_redirects=False)
             if response.is_redirect:
-                raise ValueError("Set SESSION_HUB_APP_URL to the final Domino App URL.")
+                raise requests.HTTPError(response=response)
             response.raise_for_status()
+            stage = f"Saving {name} in the workspace"
             candidate = cache / (name + ".download")
             candidate.write_bytes(response.content)
             candidate.replace(cache / name)
         break
-    except (ValueError, OSError, requests.RequestException):
+    except (ValueError, OSError, requests.RequestException) as error:
+        if isinstance(error, requests.HTTPError) and error.response is not None:
+            reason = f"HTTP {error.response.status_code}"
+        else:
+            reason = type(error).__name__
+        failure = f"{stage} failed ({reason})."
+        if failure != last_failure:
+            print(failure, file=sys.stderr, flush=True)
+            last_failure = failure
         time.sleep(5)
 else:
     raise SystemExit("Could not load the Workspace Sessions connector from the private Domino App. Check SESSION_HUB_APP_URL and App access.")

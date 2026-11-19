@@ -562,16 +562,21 @@ def require_connector_owner(token):
     identity = requests.get(f"{domino_url}/api/users/v1/self",
                             headers={"Authorization": "Bearer " + token}, timeout=8,
                             allow_redirects=False)
-    if not identity.ok or identity.json()["user"]["userName"] != owner:
+    if identity.status_code != 200 or identity.json()["user"]["userName"] != owner:
         abort(403, "Workspace identity is outside this private app.")
 
 
-@app.get("/api/connector/files/<name>")
+@app.route("/api/connector/files/<name>", methods=["GET", "POST"])
 def download_connector_file(name):
     if name not in connector_files:
         abort(404)
-    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
-    require_connector_owner(token if scheme.lower() == "bearer" else None)
+    if request.method == "POST":
+        # Domino's App proxy can replace Authorization with a viewer token.
+        token = body().get("token")
+    else:
+        scheme, _, bearer = request.headers.get("Authorization", "").partition(" ")
+        token = bearer if scheme.lower() == "bearer" else None
+    require_connector_owner(token)
     return send_from_directory(Path(__file__).resolve().parent, name, as_attachment=True)
 
 
