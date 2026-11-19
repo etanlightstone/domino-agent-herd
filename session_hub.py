@@ -624,11 +624,11 @@ def running_workspace(pid, wid):
 
 
 def resolve_ide(pid, wid):
-    run = running_workspace(pid, wid)
+    workspace, session = require_running_workspace(pid, wid)
+    run = session["executionId"]
     project = next((item for item in projects() if item["id"] == pid), None)
     if not project:
         abort(404, "Domino project is unavailable.")
-    workspace = domino(workspace_path(pid, wid))
     summary = workspace_summary(workspace, project)
     user_path = quote(project["ownerName"], safe="")
     project_path = quote(project["name"], safe="")
@@ -636,20 +636,23 @@ def resolve_ide(pid, wid):
         response = domino_response(f"/u/{user_path}/{project_path}/notebookPublicUrl/{run}")
     except DominoError as error:
         if error.status in {404, 409}:
-            return summary["ide"], False
+            abort(409, "Domino is still preparing the workspace IDE. Try opening it again in a moment.")
         raise
 
     url = response.text.strip()
-    target = urlsplit(url)
+    try:
+        target = urlsplit(url)
+    except ValueError:
+        abort(409, "Domino did not return a direct workspace IDE URL. Try opening it again in a moment.")
     expected = f"/{user_path}/{project_path}/"
     acceptable_paths = {
-        expected + f"notebookSession/{run}/",
-        expected + f"r/notebookSession/{run}/",
+        expected + f"notebookSession/{run}",
+        expected + f"r/notebookSession/{run}",
     }
     if (target.scheme != "https" or target.netloc not in {origin.netloc, summary["dataPlane"]}
-            or target.path not in acceptable_paths or target.username or target.password):
-        return summary["ide"], False
-    return url, True
+            or target.path.removesuffix("/") not in acceptable_paths or target.username or target.password):
+        abort(409, "Domino did not return a direct workspace IDE URL. Try opening it again in a moment.")
+    return url
 
 
 def iframe_allowed(target, parent, headers):
@@ -672,21 +675,24 @@ def iframe_allowed(target, parent, headers):
 
 @app.get("/workspaces/<pid>/<wid>/ide")
 def open_workspace_ide(pid, wid):
-    url, _ = resolve_ide(pid, wid)
-    return redirect(url, code=302)
+    return redirect(resolve_ide(pid, wid), code=302)
 
 
 @app.get("/api/projects/<pid>/workspaces/<wid>/ide")
 def workspace_ide(pid, wid):
-    url, resolved = resolve_ide(pid, wid)
+    url = resolve_ide(pid, wid)
     parent = request.args.get("origin", "").rstrip("/")
+    parsed = urlsplit(url)
+    same_origin = parent == f"{parsed.scheme}://{parsed.netloc}"
     allowed = False
-    if resolved and parent:
+    if parent:
         try:
             with requests.get(url, timeout=(3, 4), allow_redirects=False, stream=True) as response:
-                allowed = response.status_code < 400 and iframe_allowed(url, parent, response.headers)
+                # The probe lacks the session cookies the browser sends to Domino.
+                browser_can_retry = response.status_code in {401, 403, 404}
+                allowed = (response.ok or browser_can_retry) and iframe_allowed(url, parent, response.headers)
         except requests.RequestException:
-            pass
+            allowed = same_origin
     return jsonify(url=url, embed=allowed)
 
 

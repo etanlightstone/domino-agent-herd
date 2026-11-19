@@ -66,6 +66,10 @@ function workspaceIDELink(workspace, text, url, className) {
   return node;
 }
 
+function workspaceIDEPath(workspace) {
+  return `./workspaces/${workspace.projectId}/${workspace.id}/ide`;
+}
+
 function notice(message, error = false) {
   byId('status').textContent = message;
   byId('status').dataset.error = error;
@@ -306,7 +310,10 @@ function row(workspace) {
   if (workspace.running || workspace.projectId !== selected) label.append(element('div', workspace.name, 'meta'));
   const controls = element('div', '', 'actions');
   if (workspace.running && !transition) {
-    controls.append(workspaceIDELink(workspace, 'Open workspace', workspace.ide, 'button'),
+    const ideLink = workspace.tool === 'vscode'
+      ? workspaceIDELink(workspace, 'Open VS Code', workspaceIDEPath(workspace), 'button')
+      : link('Open workspace', workspace.ide, 'button');
+    controls.append(ideLink,
       button('Open sessions', () => {
         projectsDialog.close();
         showAgents(workspace);
@@ -399,8 +406,7 @@ function showAgentTerminal() {
 
 async function loadWorkspaceIDE(workspace) {
   const label = workspace.tool === 'vscode' ? 'VS Code' : 'Open IDE';
-  const url = `./workspaces/${workspace.projectId}/${workspace.id}/ide`;
-  const fallback = workspaceIDELink(workspace, label, url, 'button ide-link');
+  const fallback = workspaceIDELink(workspace, label, workspaceIDEPath(workspace), 'button ide-link');
   fallback.title = 'Open the workspace IDE in a browser tab';
   byId('workspace-ide').replaceChildren(fallback);
   try {
