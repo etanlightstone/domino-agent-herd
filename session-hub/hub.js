@@ -901,6 +901,13 @@ function openTerminal(slot, workspace, pane, channel, label) {
   let wheelLines = 0;
   let wheelTimer;
   let wheelCell;
+  const flushWheel = () => {
+    const steps = Math.trunc(wheelLines);
+    if (!steps) return;
+    wheelLines -= steps;
+    send({type: 'terminal.scroll', direction: steps < 0 ? 'up' : 'down',
+      lines: Math.min(200, Math.abs(steps)), ...wheelCell});
+  };
   const wheel = event => {
     if (!event.deltaY) return;
     const bounds = screen.getBoundingClientRect();
@@ -915,13 +922,12 @@ function openTerminal(slot, workspace, pane, channel, label) {
     };
     const step = event.deltaMode === 1 ? 1 : event.deltaMode === 2 ? view.rows : 17;
     wheelLines += event.deltaY / step;
-    wheelTimer ??= setTimeout(() => {
+    if (wheelTimer !== undefined || Math.abs(wheelLines) < 1) return;
+    // Send the first step immediately and batch the rest of the burst.
+    flushWheel();
+    wheelTimer = setTimeout(() => {
       wheelTimer = undefined;
-      const steps = Math.trunc(wheelLines);
-      const lines = Math.min(200, Math.abs(steps));
-      if (!lines) return;
-      wheelLines -= steps;
-      send({type: 'terminal.scroll', direction: steps < 0 ? 'up' : 'down', lines, ...wheelCell});
+      flushWheel();
     }, 40);
   };
   mount.addEventListener('wheel', wheel, {capture: true, passive: false});
