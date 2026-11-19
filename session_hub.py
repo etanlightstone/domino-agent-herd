@@ -18,6 +18,7 @@ app.config["MAX_CONTENT_LENGTH"] = 850_000
 actions = Lock()
 broker = Broker()
 setup_variable = "SESSION_HUB_CONNECTOR_ENVIRONMENT"
+ssh_preference_variable = "SESSION_HUB_WORKSPACE_SSH"
 setup_defaults = {
     "id": os.environ.get("SESSION_HUB_WORKSPACE_ENVIRONMENT_ID"),
     "baseEnvironment": os.environ.get("SESSION_HUB_BASE_ENVIRONMENT_ID"),
@@ -155,6 +156,25 @@ def connector_settings():
             stored = None
         g.connector_settings = stored if isinstance(stored, dict) else setup_defaults
     return g.connector_settings
+
+
+def workspace_ssh_preference():
+    values = domino(f"/v4/projects/{project_id}/environmentVariables")
+    value = next((item["value"] for item in values if item["name"] == ssh_preference_variable), None)
+    return {"true": True, "false": False}.get(value)
+
+
+@app.route("/api/settings/ssh", methods=["GET", "POST"])
+def ssh_settings():
+    if request.method == "GET":
+        return jsonify(enabled=workspace_ssh_preference() is True)
+    enabled = body().get("enabled")
+    if not isinstance(enabled, bool):
+        abort(400, "Choose whether to enable workspace SSH.")
+    with actions:
+        domino(f"/v4/projects/{project_id}/environmentVariables", "POST",
+               json={"name": ssh_preference_variable, "value": json.dumps(enabled)})
+    return jsonify(enabled=enabled)
 
 
 def environment_status():
@@ -433,6 +453,59 @@ def start_session(pid, workspace):
     domino(workspace_path(pid, workspace["id"]) + "/sessions", "POST", params=params, json={})
 
 
+def revision_spec(environment):
+    revision_type = environment.get("revisionType")
+    if revision_type in {"Active", "Latest"}:
+        return f"{revision_type}Revision"
+    if environment.get("revisionId"):
+        return {"revisionId": environment["revisionId"]}
+    return "ActiveRevision"
+
+
+def workspace_cluster_config(config):
+    cluster = config.get("computeClusterResponseProps") or config.get("clusterProps")
+    if not cluster:
+        return config.get("computeClusterConfig")
+    environment = cluster["computeEnvironment"]
+    return {
+        "computeEnvironmentId": environment["id"],
+        "computeEnvironmentRevisionSpec": revision_spec(environment),
+        **{key: cluster[key] for key in (
+            "clusterType", "executorCount", "workerCount", "maxWorkerCount",
+            "masterHardwareTierId", "executorHardwareTierId", "workerHardwareTierId",
+            "volumeSize", "workerStorage",
+        ) if key in cluster},
+    }
+
+
+def update_workspace_for_resume(pid, workspace, ssh_preference, use_connector):
+    config = workspace["configTemplate"]
+    current_ssh = config.get("ssh")
+    ssh = current_ssh if ssh_preference is None else {**(current_ssh or {}), "enabled": ssh_preference}
+    if not use_connector and (ssh_preference is None or ssh_preference == (current_ssh or {}).get("enabled", False)):
+        return
+
+    environment = config["environment"]
+    environment_id = environment["id"]
+    revision = revision_spec(environment)
+    persistence = config.get("persistence")
+    if use_connector:
+        environment_id = connector_settings()["id"]
+        revision = "ActiveRevision"
+        persistence = {"persistHomeDirectory": True, "persistPackages": True}
+
+    payload = {
+        "name": workspace["name"], "environmentId": environment_id,
+        "environmentRevisionSpec": revision, "hardwareTierId": config["hardwareTier"]["id"],
+        "tools": config["tools"], "ssh": ssh, "persistence": persistence,
+        "capacityType": config.get("capacityType"),
+    }
+    cluster = workspace_cluster_config(config)
+    if cluster:
+        payload["computeClusterConfig"] = cluster
+    domino(workspace_path(pid, workspace["id"]), "POST", json=payload)
+
+
 @app.post("/api/projects/<pid>/workspaces/<wid>/resume")
 def resume(pid, wid):
     with actions:
@@ -443,21 +516,17 @@ def resume(pid, wid):
             return jsonify(id=wid)
         if workspace["state"] != "Stopped":
             abort(409, "Wait for Domino to finish the current workspace operation.")
-        config = workspace["configTemplate"]
-        if body().get("managed") is not False and connector_compatibility(config) and managed_ready():
-            try:
-                domino(workspace_path(pid, wid), "POST", json={
-                    "name": workspace["name"], "environmentId": connector_settings()["id"],
-                    "environmentRevisionSpec": "ActiveRevision", "hardwareTierId": config["hardwareTier"]["id"],
-                    "tools": config["tools"], "ssh": config.get("ssh"),
-                    "persistence": {"persistHomeDirectory": True, "persistPackages": True},
-                    "capacityType": config.get("capacityType"),
-                })
-            except DominoError as error:
-                if error.status not in {400, 403, 404, 422}:
-                    raise
-                app.logger.warning("Domino rejected the connector environment update for %s (HTTP %s).",
-                                   wid, error.status)
+        ssh_preference = workspace_ssh_preference()
+        use_connector = (body().get("managed") is not False
+                         and connector_compatibility(workspace["configTemplate"]) and managed_ready())
+        try:
+            update_workspace_for_resume(pid, workspace, ssh_preference, use_connector)
+        except DominoError as error:
+            if not use_connector or error.status not in {400, 403, 404, 422}:
+                raise
+            app.logger.warning("Domino rejected the connector environment update for %s (HTTP %s).",
+                               wid, error.status)
+            update_workspace_for_resume(pid, workspace, ssh_preference, use_connector=False)
         start_session(pid, workspace)
     return jsonify(id=wid)
 
@@ -534,6 +603,7 @@ def create(pid):
         if any(item["projectId"] == pid and item["ownerName"] == owner and
                not item["deleted"] and item["name"] == name.strip() for item in inventory()):
             abort(409, "A workspace with this name already exists in the project.")
+        ssh_preference = workspace_ssh_preference()
         workspace = domino(workspace_path(pid), "POST", json={
             "name": name.strip(),
             "environmentId": environment,
@@ -541,7 +611,7 @@ def create(pid):
             "hardwareTierId": {"value": tier},
             "tools": [tool],
             "externalVolumeMounts": [],
-            "ssh": {"enabled": data.get("ssh") is True},
+            "ssh": {"enabled": data.get("ssh") is True if ssh_preference is None else ssh_preference},
             "persistence": {"persistHomeDirectory": True, "persistPackages": True},
         })
         if workspace["state"] == "Stopped" and not workspace.get("mostRecentSession"):

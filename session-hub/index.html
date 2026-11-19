@@ -83,9 +83,21 @@
 </dialog>
 <dialog id="setup-dialog" aria-labelledby="setup-heading">
   <div class="dialog-heading">
-    <h2 id="setup-heading">Workspace connector</h2>
+    <h2 id="setup-heading">Connector setup</h2>
     <form method="dialog"><button>Close</button></form>
   </div>
+  <form id="setup-ssh">
+    <label class="check">
+      <input id="setup-ssh-enabled" type="checkbox" aria-describedby="setup-ssh-help" disabled>
+      Enable SSH for Herdr on your laptop
+    </label>
+    <p id="setup-ssh-help" class="meta">Applies the next time you start or resume a workspace from this App. The SSH preference and connector environment are saved separately.</p>
+    <div class="actions">
+      <button id="setup-ssh-save" type="submit" disabled>Save SSH preference</button>
+      <span id="setup-ssh-feedback" role="status"></span>
+    </div>
+  </form>
+  <h3 id="setup-environment-heading">Connector environment</h3>
   <p id="setup-owner" class="meta"></p>
   <p id="setup-feedback" role="status"></p>
   <div id="setup-options" hidden>

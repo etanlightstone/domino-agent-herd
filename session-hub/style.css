@@ -141,6 +141,8 @@ button.confirm-danger:hover { background: #a40922; color: white; }
 
 .setup-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 #setup-owner { overflow-wrap: anywhere; }
+#setup-ssh p { margin: 0; }
+#setup-environment-heading { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; }
 #setup-sharing-warning { padding: 10px 12px; border-radius: 6px; background: var(--warning-bg); }
 #setup-link { border-top: 1px solid var(--border); padding-top: 12px; }
 #setup-link p { margin: 0; }

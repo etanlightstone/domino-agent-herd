@@ -8,6 +8,7 @@ const setupAppUrl = location.origin + location.pathname;
 let setupDetails;
 let setupTimer;
 let setupBusy = false;
+let sshPreferenceBusy = false;
 let data;
 let selected;
 const pending = new Set();
@@ -164,6 +165,7 @@ async function openSetup() {
   byId('setup-owner').textContent = '';
   byId('setup-feedback').textContent = 'Finding this Domino App…';
   setupDialog.showModal();
+  updateSshPreference();
   try {
     setupDetails = await api('setup?' + new URLSearchParams({appUrl: setupAppUrl}));
     const {owner, appUrl, environment} = setupDetails;
@@ -173,6 +175,29 @@ async function openSetup() {
     renderSetup();
   } catch (error) {
     byId('setup-feedback').textContent = error.message;
+  }
+}
+
+async function updateSshPreference(preference) {
+  if (sshPreferenceBusy) return;
+  const checkbox = byId('setup-ssh-enabled');
+  const save = byId('setup-ssh-save');
+  const feedback = byId('setup-ssh-feedback');
+  const saving = preference !== undefined;
+  let loaded = saving;
+  sshPreferenceBusy = true;
+  checkbox.disabled = save.disabled = true;
+  feedback.textContent = saving ? 'Saving SSH preference…' : 'Loading SSH preference…';
+  try {
+    const {enabled} = await api('settings/ssh', preference);
+    checkbox.checked = enabled;
+    loaded = true;
+    feedback.textContent = saving ? 'SSH preference saved.' : '';
+  } catch (error) {
+    feedback.textContent = error.message;
+  } finally {
+    sshPreferenceBusy = false;
+    checkbox.disabled = save.disabled = !loaded;
   }
 }
 
@@ -336,6 +361,7 @@ let attachment = 0;
 let activeStart = false;
 let runningAgents = [];
 let selectedPane;
+let lastRecovery = 0;
 let autoAttach = false;
 let historyRows = [];
 let visibleView = 'agent';
@@ -532,7 +558,7 @@ async function loadAgents(workspace) {
     if (agentWorkspace === workspace && load === loadNumber) agentNotice(error.message, true);
   } finally {
     if (agentWorkspace === workspace && load === loadNumber) {
-      panelRefresh = setTimeout(() => loadAgents(workspace), 4500);
+      panelRefresh = setTimeout(() => { if (!document.hidden) loadAgents(workspace); }, 4500);
     }
   }
 }
@@ -638,7 +664,7 @@ function openTerminal(channel, label) {
     cursorBlink: true, fontSize: 13, convertEol: false, scrollback: 3000, theme: terminalTheme()
   });
   const fit = new FitAddon.FitAddon();
-  const session = {channel, view, sequence: 0, sending: Promise.resolve(), poll: new AbortController()};
+  const session = {channel, label, view, sequence: 0, sending: Promise.resolve(), poll: new AbortController()};
   function send(action) {
     session.sending = session.sending.then(() =>
       terminal === session ? api('terminals/' + channel, action) : undefined
@@ -708,6 +734,7 @@ async function pumpTerminal(session) {
       session.view.write(decodeFrame(frame.bytes));
       session.sequence = frame.seq;
     }
+    session.failures = 0;
     if (!result.closed) {
       pumpTerminal(session);
       return;
@@ -717,12 +744,23 @@ async function pumpTerminal(session) {
     renderAgentTabs();
     agentNotice('The terminal disconnected. Select the agent to attach again.', true);
   } catch (error) {
-    if (terminal === session) {
-      detachTerminal();
-      selectedPane = undefined;
-      renderAgentTabs();
-      agentNotice(error.message, true);
+    if (terminal !== session) return;
+    // A suspended/idle tab drops the long-poll with a bare network TypeError; back off and retry the channel.
+    if (error instanceof TypeError && (session.failures = (session.failures || 0) + 1) <= 4) {
+      setTimeout(() => pumpTerminal(session), 1000 * session.failures);
+      return;
     }
+    const pane = selectedPane;
+    detachTerminal();
+    selectedPane = undefined;
+    renderAgentTabs();
+    // Channel is gone (expired while away): silently re-attach to the same pane, at most once per 30s.
+    if (pane && Date.now() - lastRecovery > 30000) {
+      lastRecovery = Date.now();
+      launchAgent({pane}, session.label);
+      return;
+    }
+    agentNotice(error.message, true);
   }
 }
 
@@ -955,6 +993,11 @@ for (const id of ['workspace-tabs', 'agent-running']) {
 }
 byId('connector-settings').addEventListener('click', openSetup);
 byId('connector-setup-open').addEventListener('click', openSetup);
+byId('setup-ssh').addEventListener('submit', event => {
+  event.preventDefault();
+  const checkbox = byId('setup-ssh-enabled');
+  if (!checkbox.disabled) updateSshPreference({enabled: checkbox.checked});
+});
 byId('setup-create').addEventListener('click', () => configureConnector('create'));
 byId('setup-link').addEventListener('submit', event => {
   event.preventDefault();
@@ -980,4 +1023,10 @@ themeControl.addEventListener('click', () => {
   const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   localStorage.setItem('workspace-sessions-theme', theme);
   setTheme(theme);
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (agentWorkspace) loadAgents(agentWorkspace);
+  pollOtherWorkspaces();
 });
