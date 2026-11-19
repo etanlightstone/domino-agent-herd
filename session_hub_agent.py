@@ -21,7 +21,8 @@ APP_URL = sys.argv[1]
 BOOTSTRAP = sys.argv[2]
 PROJECT = os.environ["DOMINO_PROJECT_ID"]
 RUN = os.environ["DOMINO_RUN_ID"]
-ROOT = Path("/mnt/code") if Path("/mnt/code/.git").exists() else Path("/mnt")
+CODE_ROOT = Path("/mnt/code")
+ROOT = CODE_ROOT if (CODE_ROOT / ".git").exists() else Path("/mnt")
 TERMINALS = {}
 PENDING_PANES = {}
 HISTORY_CACHE = (0, [])
@@ -29,6 +30,7 @@ RUNNING_LABELS = {}
 EVENTS = Queue(maxsize=100)
 MANAGE = Lock()
 VSCODE_SETTINGS = Lock()
+GIT_SYNC = Lock()
 HERDR = ["herdr", "--session", "domino-hub"]
 AGENT_FLAGS = {
     "codex": "--yolo",
@@ -465,6 +467,89 @@ def set_vscode_theme(theme):
                 candidate.unlink(missing_ok=True)
 
 
+def git(*args, timeout=5):
+    return subprocess.run(
+        ["git", *args], cwd=CODE_ROOT, text=True, errors="replace", capture_output=True,
+        stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        check=True, timeout=timeout,
+    ).stdout.rstrip("\n")
+
+
+def git_worktree_status():
+    operation_paths = git("rev-parse", "--git-path", "MERGE_HEAD", "--git-path", "rebase-merge",
+                          "--git-path", "rebase-apply", "--git-path", "CHERRY_PICK_HEAD",
+                          "--git-path", "REVERT_HEAD", "--git-path", "sequencer",
+                          "--git-path", "BISECT_START").splitlines()
+    changes = git("--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal").splitlines()
+    if any((CODE_ROOT / name).exists() for name in operation_paths) or any(
+        line[:2] in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"} for line in changes
+    ):
+        return {"state": "error", "detail": "Finish the Git operation or resolve the conflicts in the workspace first."}
+    if changes:
+        return {"state": "dirty", "detail": "You have uncommitted changes. Sync Git checks again. Commit or stash your changes before syncing."}
+    return None
+
+
+def workspace_git(sync):
+    if not GIT_SYNC.acquire(blocking=False):
+        return {"state": "busy", "detail": "Another Git check or sync is running. Try again in a moment."}
+    try:
+        if not (CODE_ROOT / ".git").exists():
+            return {"state": "error", "detail": "The project’s Git checkout is missing from this workspace."}
+        status = git_worktree_status()
+        if status:
+            return status
+        try:
+            branch = git("symbolic-ref", "--quiet", "HEAD")
+        except subprocess.CalledProcessError:
+            return {"state": "error", "detail": "The workspace is on a Git commit instead of a branch. Switch to a branch to sync."}
+        tracking = git("for-each-ref", "--format=%(upstream)%09%(upstream:remotename)%09%(upstream:remoteref)",
+                       branch).split("\t")
+        if len(tracking) != 3 or not tracking[0].startswith("refs/remotes/") or not tracking[1] or not tracking[2].startswith("refs/heads/"):
+            return {"state": "error", "detail": "This branch has no remote branch set up for syncing. Set an upstream branch in the workspace."}
+        upstream, remote, remote_branch = tracking
+        head = git("rev-parse", "HEAD")
+        try:
+            git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+                "--", remote, f"+{remote_branch}:{upstream}", timeout=20)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return {"state": "error", "detail": "Could not fetch the remote branch. Check Git credentials, network access, and the branch in the workspace."}
+        status = git_worktree_status()
+        if status:
+            return status
+        tip = git("rev-parse", upstream)
+        ahead, behind = map(int, git("rev-list", "--left-right", "--count", f"{head}...{tip}").split())
+        if git("symbolic-ref", "--quiet", "HEAD") != branch or git("rev-parse", "HEAD") != head:
+            return {"state": "busy", "detail": "The workspace branch changed during the check. Try again."}
+        if ahead and behind:
+            return {"state": "error", "detail": "This branch and its remote both have new commits. Merge or rebase in the workspace before syncing."}
+        if sync and behind:
+            try:
+                git("-c", "submodule.recurse=false", "merge", "--ff-only", "--no-autostash", tip, timeout=25)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return {"state": "error", "detail": "Git could not pull the remote commits. Check the branch and files in the workspace."}
+        if sync and ahead:
+            try:
+                git("-c", "push.followTags=false", "push", "--recurse-submodules=no",
+                    "--", remote, f"{head}:{remote_branch}", timeout=25)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return {"state": "error", "detail": "Git could not push your commits. Check remote access and branch permissions, then try again."}
+        if sync:
+            status = git_worktree_status()
+            if status:
+                return status
+        elif behind:
+            return {"state": "dirty", "detail": "The remote branch has new commits. Sync Git pulls them into this workspace."}
+        elif ahead:
+            return {"state": "dirty", "detail": "You have local commits to push. Sync Git sends them to the remote branch."}
+        return {"state": "clean", "detail": "Your branch is up to date. Sync Git checks for new commits to pull or push.",
+                "synced": sync}
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return {"state": "error", "detail": "Could not check Git in this workspace. Open the workspace to check the repository."}
+    finally:
+        GIT_SYNC.release()
+
+
 def handle(command):
     operation = command["operation"]
     tag = command.get("request")
@@ -472,6 +557,8 @@ def handle(command):
         if operation == "vscode_theme":
             set_vscode_theme(command["theme"])
             value = True
+        elif operation in {"git_status", "git_sync"}:
+            value = workspace_git(sync=operation == "git_sync")
         else:
             value = handle_agent_action(operation, command)
         EVENTS.put({"request": tag, "value": value})

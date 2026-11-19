@@ -365,6 +365,7 @@ let lastRecovery = 0;
 let autoAttach = false;
 let historyRows = [];
 let visibleView = 'agent';
+let gitView;
 
 function agentNotice(message, error = false) {
   byId('agent-summary').textContent = message;
@@ -385,6 +386,7 @@ function closeWorkspace() {
   clearTimeout(panelRefresh);
   detachTerminal();
   agentWorkspace = undefined;
+  gitView = undefined;
   byId('agent-panel').hidden = true;
   byId('ide-frame').replaceChildren();
 }
@@ -414,6 +416,10 @@ function showAgents(workspace) {
   agentNotice('Loading agent sessions…');
   renderWorkspaceTabs();
   loadWorkspaceIDE(workspace);
+  gitView = {workspace};
+  gitFeedback('');
+  renderGit({state: 'busy', detail: 'Checking this workspace’s Git status…'});
+  refreshGit();
   loadAgents(workspace);
 }
 
@@ -468,6 +474,69 @@ async function loadWorkspaceIDE(workspace) {
     // The redirect link can resolve the IDE when its route becomes ready.
   }
 }
+
+const gitIcons = {clean: '✓', dirty: '●', error: '×', disabled: '–', busy: '↻'};
+
+function renderGit({state, detail}) {
+  const control = byId('git-sync');
+  control.dataset.state = state;
+  control.setAttribute('aria-disabled', String(state === 'disabled' || state === 'busy'));
+  control.title = detail;
+  control.setAttribute('aria-label', `Sync Git. ${detail}`);
+  byId('git-icon').textContent = gitIcons[state];
+}
+
+function gitFeedback(message, error = false) {
+  const feedback = byId('git-feedback');
+  feedback.textContent = message;
+  feedback.hidden = !message;
+  feedback.classList.toggle('error', error);
+}
+
+async function requestGit(view, sync) {
+  const {workspace} = view;
+  try {
+    return await api(`projects/${workspace.projectId}/workspaces/${workspace.id}/git`,
+      sync ? {run: workspace.run} : undefined, AbortSignal.timeout(85000));
+  } catch (error) {
+    let detail = error.message;
+    if (error.name === 'TimeoutError') detail = 'The workspace took too long to respond.';
+    if (error instanceof TypeError) detail = 'Could not reach the workspace.';
+    if (detail === 'Unknown connector action.') detail = 'Restart this workspace to update its connector.';
+    return {state: 'error', detail};
+  }
+}
+
+async function refreshGit() {
+  const view = gitView;
+  if (!view || view.check || view.syncing) return;
+  view.check = requestGit(view, false);
+  const status = await view.check;
+  view.check = undefined;
+  if (view === gitView && !view.syncing) showGitStatus(status);
+}
+
+function showGitStatus(status) {
+  const {state, detail} = status;
+  renderGit({state, detail: state === 'error' ? `${detail} Click Sync Git to try again.` : detail});
+}
+
+byId('git-sync').addEventListener('click', async () => {
+  const view = gitView;
+  if (!view || byId('git-sync').getAttribute('aria-disabled') === 'true') return;
+  view.syncing = true;
+  gitFeedback('');
+  renderGit({state: 'busy', detail: 'Syncing this workspace’s Git branch…'});
+  await view.check;
+  if (view !== gitView) return;
+  const status = await requestGit(view, true);
+  if (view !== gitView) return;
+  view.syncing = false;
+  showGitStatus(status);
+  gitFeedback(status.synced ? 'Git is up to date.' : status.detail, status.state === 'error');
+  if (status.state === 'busy') setTimeout(refreshGit, 1500);
+});
+setInterval(() => { if (!document.hidden) refreshGit(); }, 30000);
 
 function agentKind(item) {
   return item.kind === 'claude' || item.label?.startsWith('Claude Code') ? 'Claude Code' : 'Codex';
@@ -1034,7 +1103,7 @@ byId('setup-link').addEventListener('submit', event => {
   event.preventDefault();
   configureConnector('link', new FormData(event.currentTarget).get('environmentId').trim());
 });
-byId('refresh').addEventListener('click', () => refresh().catch(error => notice(error.message, true)));
+byId('refresh').addEventListener('click', () => refresh().then(refreshGit).catch(error => notice(error.message, true)));
 refresh().then(() => {
   notice('');
   if (data.setup?.state === 'unconfigured') openSetup();
@@ -1059,5 +1128,6 @@ themeControl.addEventListener('click', () => {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   if (agentWorkspace) loadAgents(agentWorkspace);
+  refreshGit();
   pollOtherWorkspaces();
 });

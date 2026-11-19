@@ -77,6 +77,13 @@ button:disabled { opacity: .5; cursor: default; }
 .agent-dot[data-state=done], .agent-dot[data-state=idle] { background: var(--success); opacity: 1; }
 .agent-dot[data-state=blocked] { background: var(--warning); opacity: 1; }
 .ide-link { margin-left: 2px; flex-shrink: 0; }
+#git-sync { flex-shrink: 0; }
+#git-sync[aria-disabled=true] { color: var(--muted); cursor: default; }
+#git-sync[aria-disabled=true]:hover { border-color: var(--border); }
+#git-icon { display: inline-block; width: 1em; text-align: center; font-weight: 700; }
+#git-sync[data-state=clean] #git-icon { color: var(--success); }
+#git-sync[data-state=dirty] #git-icon { color: var(--warning); }
+#git-sync[data-state=error] #git-icon { color: var(--error); }
 .meta { font-size: .82rem; color: var(--muted); margin: 2px 0 0; overflow-wrap: anywhere; }
 .status-tag { display: inline-block; padding: 1px 7px; border-radius: 4px; background: var(--hover); }
 .status-tag[data-running=true] { color: var(--success); background: var(--success-bg); }
@@ -84,7 +91,7 @@ button:disabled { opacity: .5; cursor: default; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 #agent-controls { flex-shrink: 0; }
 #status { color: var(--accent-text); margin: 5px 0; font-size: .87rem; }
-#agent-summary { margin: 0; padding: 5px 12px; background: var(--hover); font-size: .83rem; }
+#agent-summary, #git-feedback { margin: 0; padding: 5px 12px; background: var(--hover); font-size: .83rem; }
 #status[data-error=true], .error { color: var(--error) !important; }
 .agents { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .empty { text-align: center; padding: 40px 18px; }

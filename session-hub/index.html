@@ -43,9 +43,13 @@
       <div class="agent-switcher">
         <div id="agent-running" class="agent-tabs" role="tablist" aria-label="Agent panes"></div>
         <div id="workspace-ide"></div>
+        <button id="git-sync" type="button" aria-disabled="true">
+          <span id="git-icon" aria-hidden="true">↻</span> Sync Git
+        </button>
       </div>
       <div id="agent-controls" class="actions"></div>
     </div>
+    <p id="git-feedback" role="status" hidden></p>
     <p id="agent-summary" role="status" hidden></p>
     <div id="agent-view">
       <div id="agent-empty" class="empty compact" hidden></div>

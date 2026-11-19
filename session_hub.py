@@ -779,6 +779,21 @@ def workspace_ide_theme(pid, wid):
     return jsonify(applied=True)
 
 
+@app.route("/api/projects/<pid>/workspaces/<wid>/git", methods=["GET", "POST"])
+def workspace_git(pid, wid):
+    run = running_workspace(pid, wid)
+    sync = request.method == "POST"
+    if sync and body().get("run") != run:
+        abort(409, "The workspace restarted. Refresh the page before syncing.")
+    project = domino(f"/api/projects/v1/projects/{pid}")["project"]
+    if not project.get("mainRepository"):
+        return jsonify(state="disabled", detail="Git sync is unavailable for Domino File System projects.")
+    if not broker.status(run)["connected"]:
+        return jsonify(state="disabled", detail="Git sync needs a connected workspace.")
+    operation = "git_sync" if sync else "git_status"
+    return jsonify(broker.call(run, operation, timeout=65, require_ready=False))
+
+
 @app.get("/api/projects/<pid>/workspaces/<wid>/agents")
 def workspace_agents(pid, wid):
     run = running_workspace(pid, wid)
