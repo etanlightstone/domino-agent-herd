@@ -720,6 +720,31 @@ const encodeInput = value => {
 };
 const decodeFrame = value => Uint8Array.from(atob(value), char => char.charCodeAt(0));
 
+const MAX_IMAGE_BYTES = 520_000;
+
+async function imageToBase64(file) {
+  let blob = file;
+  if (blob.size > MAX_IMAGE_BYTES || !/^image\/(png|jpeg|gif|webp)$/.test(blob.type)) {
+    // Shrink big screenshots (agents downscale anyway) so the upload stays small.
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    for (const quality of [0.85, 0.7, 0.5]) {
+      blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (blob && blob.size <= MAX_IMAGE_BYTES) break;
+    }
+    if (!blob || blob.size > MAX_IMAGE_BYTES) throw new Error('That image is too large to paste.');
+  }
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let raw = '';
+  for (let pos = 0; pos < bytes.length; pos += 8192) raw += String.fromCharCode(...bytes.subarray(pos, pos + 8192));
+  return btoa(raw);
+}
+
 function terminalTheme() {
   return document.documentElement.dataset.theme === 'dark'
     ? {background: '#1a1923', foreground: '#f4f3fa', cursor: '#b7aaff', selectionBackground: '#514367'}
@@ -786,6 +811,20 @@ function openTerminal(channel, label) {
     type: 'terminal.resize', cols: Math.max(10, Math.min(350, cols)), rows: Math.max(4, Math.min(140, rows))
   }));
   session.fit = fit;
+  // Pasted images: the agent runs in the workspace, so it can't see this browser's clipboard. Upload the
+  // image to the workspace, which types its file path into the pane (both Claude Code and Codex attach it).
+  session.paste = async event => {
+    const file = [...event.clipboardData?.files || []].find(item => item.type.startsWith('image/'));
+    if (!file) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      send({type: 'terminal.image', bytes: await imageToBase64(file)});
+    } catch (error) {
+      agentNotice(error.message, true);
+    }
+  };
+  mount.addEventListener('paste', session.paste, true);
   // Herdr routes wheel input to either the terminal app or its scrollback.
   const screen = mount.querySelector('.xterm-screen');
   let wheelLines = 0;
@@ -871,6 +910,7 @@ function detachTerminal() {
   session.poll.abort();
   session.resize.disconnect();
   byId('terminal').removeEventListener('wheel', session.wheel, {capture: true});
+  byId('terminal').removeEventListener('paste', session.paste, true);
   session.view.dispose();
   byId('terminal-panel').hidden = true;
   byId('terminal').replaceChildren();

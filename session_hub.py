@@ -860,6 +860,15 @@ def terminal_input(channel):
             if type(column) is not int or type(row) is not int or not (0 <= column < 350 and 0 <= row < 140):
                 abort(400, "Invalid terminal scroll position.")
             action.update(column=column, row=row)
+    elif kind == "terminal.image":
+        encoded = action.get("bytes")
+        if not isinstance(encoded, str) or len(encoded) > 780_000:
+            abort(400, "This image is too large to paste.")
+        try:
+            base64.b64decode(encoded, validate=True)
+        except ValueError:
+            abort(400, "Invalid image.")
+        action = {"type": kind, "bytes": encoded}
     elif kind == "terminal.release":
         action = {"type": kind}
     else:

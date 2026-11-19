@@ -1,5 +1,6 @@
 """Workspace-side connector for managing Herdr Codex and Claude Code sessions."""
 
+import base64
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from queue import Empty, Queue
@@ -382,7 +384,40 @@ def attach(pane, channel):
     Thread(target=read_terminal, args=(channel, child), daemon=True).start()
 
 
+IMAGE_TYPES = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"), (b"GIF8", "gif"))
+PASTE_DIR = Path(tempfile.gettempdir()) / "session-hub-pastes"
+
+
+def save_pasted_image(encoded):
+    """Store a browser-pasted image in the workspace and return a bracketed-paste of its path."""
+    data = base64.b64decode(encoded, validate=True)
+    extension = next((ext for magic, ext in IMAGE_TYPES if data.startswith(magic)), None)
+    if not extension and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        extension = "webp"
+    if not extension or len(data) > 700_000:
+        return None
+    PASTE_DIR.mkdir(mode=0o700, exist_ok=True)
+    cutoff = time.time() - 86_400
+    for old in PASTE_DIR.glob("paste-*"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+    path = PASTE_DIR / f"paste-{uuid4().hex[:12]}.{extension}"
+    path.write_bytes(data)
+    text = f"\x1b[200~{path}\x1b[201~ "
+    return {"type": "terminal.input", "bytes": base64.b64encode(text.encode()).decode(), "encoding": "base64"}
+
+
 def terminal_input(channel, action):
+    if action.get("type") == "terminal.image":
+        try:
+            action = save_pasted_image(action.get("bytes", ""))
+        except (ValueError, OSError):
+            action = None
+        if not action:
+            return
     child = TERMINALS.get(channel)
     if child and child.poll() is None:
         try:
