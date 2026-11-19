@@ -318,13 +318,13 @@ def connector_compatibility(config):
     base_revision_id = linked.get("baseRevision")
     if (not identifier or not revision or not base_id or not base_revision_id or identifier == linked.get("id")
             or config.get("clusterConfig") or config.get("computeClusterConfig")):
-        return None
+        return False
     if identifier == base_id:
-        return "base" if revision == base_revision_id else None
+        return revision == base_revision_id
 
     revisions = g.setdefault("connector_compatibility", {})
     if revision not in revisions:
-        revisions[revision] = None
+        revisions[revision] = False
         try:
             details = domino(f"/v4/environments/environmentRevision/{check_id(revision)}")
         except DominoError as error:
@@ -338,7 +338,7 @@ def connector_compatibility(config):
                     and previous.get("environmentId") == identifier
                     and "session_hub_agent.py" in hook and "herdr-workspace.sh" in hook
                     and ("SESSION_HUB_APP_URL=" in hook or "app_path = " in hook)):
-                revisions[revision] = "previous"
+                revisions[revision] = True
     return revisions[revision]
 
 
@@ -351,7 +351,6 @@ def workspace_summary(workspace, project):
     status = session.get("sessionStatusInfo") or {}
     project_info = project_summary(project)
     environment = config.get("environment") or {}
-    compatibility = connector_compatibility(config)
     ide = None
     if status.get("isRunning") and execution:
         params = urlencode({
@@ -365,8 +364,7 @@ def workspace_summary(workspace, project):
         "running": bool(ide), "ide": ide, "ssh": ssh_enabled, "run": execution,
         "tool": next(iter((session.get("config") or config).get("tools") or []), None),
         "managed": bool(connector_settings().get("id")) and environment.get("id") == connector_settings()["id"],
-        "canEnable": bool(compatibility),
-        "previousConnector": compatibility == "previous",
+        "canEnable": connector_compatibility(config),
         "connector": broker.status(execution),
         "dataPlane": data_plane if workspace.get("dataPlaneId") != "000000000000000000000000" else None,
         "local": bool(local_run and execution == local_run),
@@ -446,18 +444,20 @@ def resume(pid, wid):
         if workspace["state"] != "Stopped":
             abort(409, "Wait for Domino to finish the current workspace operation.")
         config = workspace["configTemplate"]
-        if body().get("managed") is True:
-            if not connector_compatibility(config):
-                abort(409, "This workspace uses a different environment. Resume it with its existing settings.")
-            if not managed_ready():
-                abort(409, "The Workspace Sessions environment is still building.")
-            domino(workspace_path(pid, wid), "POST", json={
-                "name": workspace["name"], "environmentId": connector_settings()["id"],
-                "environmentRevisionSpec": "ActiveRevision", "hardwareTierId": config["hardwareTier"]["id"],
-                "tools": config["tools"], "ssh": config.get("ssh"),
-                "persistence": {"persistHomeDirectory": True, "persistPackages": True},
-                "capacityType": config.get("capacityType"),
-            })
+        if body().get("managed") is not False and connector_compatibility(config) and managed_ready():
+            try:
+                domino(workspace_path(pid, wid), "POST", json={
+                    "name": workspace["name"], "environmentId": connector_settings()["id"],
+                    "environmentRevisionSpec": "ActiveRevision", "hardwareTierId": config["hardwareTier"]["id"],
+                    "tools": config["tools"], "ssh": config.get("ssh"),
+                    "persistence": {"persistHomeDirectory": True, "persistPackages": True},
+                    "capacityType": config.get("capacityType"),
+                })
+            except DominoError as error:
+                if error.status not in {400, 403, 404, 422}:
+                    raise
+                app.logger.warning("Domino rejected the connector environment update for %s (HTTP %s).",
+                                   wid, error.status)
         start_session(pid, workspace)
     return jsonify(id=wid)
 

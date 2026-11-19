@@ -247,14 +247,7 @@ function row(workspace) {
       button('Stop', () => confirmWorkspaceAction(workspace, 'stop')));
   } else if (workspace.state === 'Stopped' && !transition && !pending.has(workspace.id)) {
     const path = `projects/${workspace.projectId}/workspaces/${workspace.id}/resume`;
-    if (workspace.previousConnector && data.managedAvailable) {
-      controls.append(button('Resume on this App', () => runAction(path, {managed: true}), 'primary'));
-    } else {
-      controls.append(button('Resume workspace', () => runAction(path, {}), 'primary'));
-      if (workspace.canEnable && data.managedAvailable) {
-        controls.append(button('Resume with agent sessions', () => runAction(path, {managed: true})));
-      }
-    }
+    controls.append(button('Resume workspace', () => runAction(path, {}), 'primary'));
     controls.append(button('Delete', () => confirmWorkspaceAction(workspace, 'delete'), 'danger'));
   }
   container.append(label, controls);
@@ -425,8 +418,7 @@ async function loadAgents(workspace) {
     if (!list.ready) {
       byId('agent-controls').replaceChildren();
       if (!list.connected && workspace.canEnable && data.managedAvailable) {
-        const label = workspace.previousConnector ? 'Restart on this App' : 'Restart with agent sessions';
-        byId('agent-controls').append(button(label,
+        byId('agent-controls').append(button('Restart with agent sessions',
           () => confirmConnectorRestart(workspace), 'primary'));
       }
       runningAgents = [];
@@ -434,9 +426,7 @@ async function loadAgents(workspace) {
       agentNotice(list.detail || (workspace.managed
         ? 'Waiting for the workspace connector to start…'
         : workspace.canEnable && data.managedAvailable
-          ? workspace.previousConnector
-            ? 'Restart this workspace to connect it to this App and load saved conversations.'
-            : 'Restart this workspace to enable agent sessions here.'
+          ? 'Restart this workspace to enable agent sessions here.'
           : 'Agent sessions are unavailable for this workspace’s environment.'));
       return;
     }
@@ -704,9 +694,7 @@ async function watchWorkspaceAction(workspace, deleting) {
 function confirmConnectorRestart(workspace) {
   dialogBody.replaceChildren(
     element('h2', `Restart ${workspace.project} with agent sessions?`),
-    element('p', workspace.previousConnector
-      ? 'This ends running processes and resumes the same workspace with this App’s connector. You can resume saved conversations from History.'
-      : 'This ends processes currently running in the workspace. Domino will resume the same workspace with the connector enabled.'),
+    element('p', 'This ends running processes. Domino will then resume the workspace and connect it to this App when the connector is available.'),
     button('Restart workspace', () => {
       dialog.close();
       restartWithConnector(workspace);
@@ -726,12 +714,12 @@ async function restartWithConnector(workspace) {
       await new Promise(resolve => setTimeout(resolve, 2500));
       await refresh();
       if (data.workspaces.find(item => item.id === workspace.id)?.state === 'Stopped') {
-        await runAction(path + '/resume', {managed: true}, true);
+        await runAction(path + '/resume', {}, true);
         if (agentWorkspace === workspace) closeWorkspace();
         return;
       }
     }
-    notice('Domino is still stopping the workspace. Once stopped, use Resume with agent sessions.', true);
+    notice('Domino is still stopping the workspace. Once stopped, choose Resume workspace.', true);
   } catch (error) {
     notice(error.message, true);
     if (agentWorkspace === workspace) agentNotice(error.message, true);
@@ -766,16 +754,13 @@ async function createDialog(project) {
         ? 'Uses the private Workspace Sessions environment and this project’s default hardware tier.'
         : 'Uses this project’s default compute environment and hardware tier.';
     }
-    const ssh = element('input');
-    ssh.type = 'checkbox';
-    ssh.checked = false;
     const managed = element('input');
     managed.type = 'checkbox';
     managed.checked = connectorTools.length > 0 && (sameBase || !tools.length);
     managed.addEventListener('change', selectTools);
     const fields = [['Workspace name', name]];
     if (connectorTools.length) fields.push(['Connect Codex and Claude Code to this app', managed]);
-    fields.push(['IDE', tool], ['Enable SSH', ssh]);
+    fields.push(['IDE', tool]);
     for (const [text, input] of fields) {
       const label = element('label', text, input.type === 'checkbox' ? 'check' : '');
       label.append(input);
@@ -790,7 +775,7 @@ async function createDialog(project) {
       submit.disabled = true;
       try {
         await runAction(`projects/${project.id}/workspaces`, {
-          name: name.value, tool: tool.value, ssh: ssh.checked, managed: managed.checked
+          name: name.value, tool: tool.value, managed: managed.checked
         }, true);
         dialog.close();
       } catch (failure) {
