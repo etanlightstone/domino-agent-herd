@@ -23,7 +23,7 @@
 </header>
 <main>
   <div class="workspace-tab-bar">
-    <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Running workspaces"></div>
+    <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Workspaces and split view"></div>
     <button id="block-drop-open" class="block-drop-launch" type="button" aria-label="Play Block Drop" aria-haspopup="dialog" title="Play Block Drop">
       <span class="block-drop-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
     </button>
@@ -69,7 +69,15 @@
       <div id="ide-frame"></div>
     </div>
   </section>
+  <section id="split-panel" role="tabpanel" aria-labelledby="split-tab" hidden></section>
 </main>
+<dialog id="session-picker" aria-labelledby="session-picker-title">
+  <div class="dialog-heading">
+    <h2 id="session-picker-title">Choose a session</h2>
+    <form method="dialog"><button>Close</button></form>
+  </div>
+  <div id="session-picker-list" aria-live="polite"></div>
+</dialog>
 <dialog id="projects-dialog" class="wide-dialog" aria-labelledby="project-heading">
   <div class="dialog-heading">
     <h2 id="project-heading">Projects</h2>

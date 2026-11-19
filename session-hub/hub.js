@@ -101,10 +101,26 @@ function render() {
   const previous = localStorage.getItem('workspace-sessions-active');
   const next = retained || running.find(workspace => workspace.id === previous) ||
     running.find(workspace => workspace.connector.ready) || running[0];
-  if (next && !retained) showAgents(next);
-  if (!next && agentWorkspace) closeWorkspace();
+  if (splitActive) {
+    if (!retained && agentWorkspace) closeWorkspace();
+    const stillRunning = ({workspace}) => running.some(item => workspaceKey(item) === workspaceKey(workspace));
+    for (const tile of splitTiles) {
+      const lostRequest = tile.request && !stillRunning(tile.request);
+      const lostTerminal = tile.terminal && !stillRunning(tile.terminal);
+      if (lostRequest) tile.request = undefined;
+      if (lostTerminal) detachTerminal(tile);
+      if ((lostRequest || lostTerminal) && !tile.request) {
+        slotNotice(tile, 'This workspace is no longer running. Choose another session.', true);
+        renderTerminalSlot(tile);
+      }
+    }
+  } else if (next && !retained) {
+    showAgents(next);
+  } else if (!next && agentWorkspace) {
+    closeWorkspace();
+  }
   renderWorkspaceTabs();
-  byId('empty-workspaces').hidden = Boolean(next);
+  byId('empty-workspaces').hidden = splitActive || Boolean(next);
   renderProjects();
   renderDetail();
   renderSetup();
@@ -224,7 +240,7 @@ async function configureConnector(mode, environmentId) {
 function renderWorkspaceTabs() {
   const running = data?.workspaces.filter(workspace => (workspace.running || pending.has(workspace.id)) &&
     !changing.has(workspace.id)) || [];
-  setTabs('workspace-tabs', running.map(workspace => {
+  const tabs = running.map(workspace => {
     const repeated = running.filter(item => item.projectId === workspace.projectId).length > 1;
     const label = repeated ? workspace.project + ' / ' + workspace.name : workspace.project;
     const tab = button(label, () => showAgents(workspace), 'workspace-tab');
@@ -232,7 +248,7 @@ function renderWorkspaceTabs() {
     tab.dataset.key = workspace.id;
     tab.setAttribute('role', 'tab');
     tab.setAttribute('aria-controls', 'agent-panel');
-    tab.setAttribute('aria-selected', String(workspace.id === agentWorkspace?.id));
+    tab.setAttribute('aria-selected', String(!splitActive && workspace.id === agentWorkspace?.id));
     tab.disabled = !workspace.running;
     if (tab.disabled) tab.textContent += ' · Starting';
     const state = workspaceAgentState(workspace);
@@ -243,7 +259,15 @@ function renderWorkspaceTabs() {
       tab.title = `${workspace.name} · ${state}`;
     }
     return tab;
-  }));
+  });
+  const split = iconButton('Split view', enterSplit, element('span', '', 'split-icon'), 'workspace-tab split-tab');
+  split.id = 'split-tab';
+  split.dataset.key = 'split';
+  split.setAttribute('role', 'tab');
+  split.setAttribute('aria-controls', 'split-panel');
+  split.setAttribute('aria-selected', String(splitActive));
+  tabs.push(split);
+  setTabs('workspace-tabs', tabs);
 }
 
 const otherAgents = new Map();
@@ -354,14 +378,13 @@ function row(workspace) {
 }
 
 let agentWorkspace;
-let terminal;
+const normalSlot = {mount: byId('terminal')};
+let splitActive = false;
 let panelRefresh;
 let loadNumber = 0;
-let attachment = 0;
 let activeStart = false;
 let runningAgents = [];
 let selectedPane;
-let lastRecovery = 0;
 let autoAttach = false;
 let historyRows = [];
 let visibleView = 'agent';
@@ -382,18 +405,32 @@ function workspaceKey(workspace) {
 }
 
 function closeWorkspace() {
-  attachment++;
+  normalSlot.request = undefined;
   clearTimeout(panelRefresh);
-  detachTerminal();
+  detachTerminal(normalSlot);
   agentWorkspace = undefined;
   gitView = undefined;
   byId('agent-panel').hidden = true;
   byId('ide-frame').replaceChildren();
 }
 
-function showAgents(workspace) {
-  if (agentWorkspace?.id === workspace.id && agentWorkspace.run === workspace.run) {
+function showAgents(workspace, preferred) {
+  const wasSplit = splitActive;
+  let transfer;
+  if (wasSplit) {
+    const previous = sessionStorage.getItem('agent:' + workspaceKey(workspace));
+    const matches = splitTiles.map(tile => tile.terminal || tile.request)
+      .filter(item => item && workspaceKey(item.workspace) === workspaceKey(workspace));
+    transfer = preferred || matches.find(item => item.pane === previous) || matches[0];
+    leaveSplit(transfer);
+  }
+  if (agentWorkspace && workspaceKey(agentWorkspace) === workspaceKey(workspace)) {
+    if (transfer) restoreNormalTerminal(transfer);
     showAgentTerminal();
+    if (wasSplit) {
+      renderWorkspaceTabs();
+      loadAgents(agentWorkspace);
+    }
     return;
   }
   closeWorkspace();
@@ -414,6 +451,10 @@ function showAgents(workspace) {
   byId('ide-panel').hidden = true;
   byId('agent-empty').hidden = true;
   agentNotice('Loading agent sessions…');
+  if (transfer) {
+    restoreNormalTerminal(transfer);
+    focusTerminal(normalSlot.terminal);
+  }
   renderWorkspaceTabs();
   loadWorkspaceIDE(workspace);
   gitView = {workspace};
@@ -430,10 +471,7 @@ function showAgentTerminal() {
   const tab = byId('workspace-ide').querySelector('[role=tab]');
   if (tab) tab.setAttribute('aria-selected', 'false');
   renderAgentTabs();
-  if (terminal) {
-    terminal.fit.fit();
-    terminal.view.focus();
-  }
+  focusTerminal(normalSlot.terminal);
 }
 
 async function loadWorkspaceIDE(workspace) {
@@ -569,7 +607,7 @@ function renderAgentTabs() {
 
 function selectAgent(item) {
   showAgentTerminal();
-  if (selectedPane === item.pane && terminal) return;
+  if (selectedPane === item.pane && (normalSlot.terminal || normalSlot.request)) return;
   launchAgent({pane: item.pane}, item.title || item.label);
 }
 
@@ -605,15 +643,16 @@ async function loadAgents(workspace) {
       byId('agent-controls').dataset.workspace = workspaceKey(workspace);
       byId('agent-controls').replaceChildren(codex, claude, button('History', openHistory));
     }
-    if (!activeStart && !byId('agent-summary').classList.contains('error')) agentNotice(list.detail || '');
+    if (!normalSlot.request && !byId('agent-summary').classList.contains('error')) agentNotice(list.detail || '');
     runningAgents = list.running;
     renderAgentTabs();
     renderWorkspaceTabs();
     const empty = byId('agent-empty');
-    empty.hidden = Boolean(terminal) || Boolean(selectedPane);
+    empty.hidden = Boolean(normalSlot.terminal || normalSlot.request);
     empty.textContent = runningAgents.length ? 'Choose an agent tab to attach.' :
       'Start an agent or resume a conversation from History.';
-    if (autoAttach && runningAgents.length && !terminal && !selectedPane && visibleView === 'agent') {
+    if (autoAttach && !splitActive && runningAgents.length && !normalSlot.terminal &&
+        !normalSlot.request && visibleView === 'agent') {
       autoAttach = false;
       const previous = sessionStorage.getItem('agent:' + workspaceKey(workspace));
       selectAgent(runningAgents.find(item => item.pane === previous) || runningAgents[0]);
@@ -675,35 +714,72 @@ async function launchAgent(payload, label) {
   const starting = !payload.pane;
   if (starting && activeStart) return;
   const workspace = agentWorkspace;
-  const ticket = ++attachment;
   if (starting) activeStart = true;
   autoAttach = false;
-  detachTerminal();
+  detachTerminal(normalSlot);
   selectedPane = payload.pane;
-  visibleView = 'agent';
   showAgentTerminal();
   byId('agent-empty').hidden = true;
-  agentNotice(payload.pane ? 'Attaching…' : payload.conversation ? 'Resuming conversation…' : 'Starting agent…');
   try {
-    const opened = await api(agentPath(workspace) + (payload.pane ? '/attach' : ''), payload);
-    if (agentWorkspace !== workspace || attachment !== ticket) {
-      api('terminals/' + opened.channel, {type: 'terminal.release'}).catch(() => {});
-      return;
-    }
-    selectedPane = opened.pane || payload.pane;
-    if (selectedPane) sessionStorage.setItem('agent:' + workspaceKey(workspace), selectedPane);
-    openTerminal(opened.channel, opened.label || label);
-    renderAgentTabs();
-    agentNotice('');
-  } catch (error) {
-    if (agentWorkspace === workspace && attachment === ticket) {
-      selectedPane = undefined;
-      renderAgentTabs();
-      agentNotice(error.message, true);
-    }
+    await connectAgent(normalSlot, workspace, payload, label);
   } finally {
     if (starting) activeStart = false;
-    if (agentWorkspace === workspace && attachment === ticket) loadAgents(workspace);
+  }
+}
+
+const paneRequests = new Map();
+
+async function connectAgent(slot, workspace, payload, label) {
+  const status = payload.pane ? 'Attaching…' : payload.conversation ? 'Resuming conversation…' : 'Starting agent…';
+  const request = {slot, workspace, pane: payload.pane, label, status};
+  slot.request = request;
+  slotNotice(slot, status);
+  renderTerminalSlot(slot);
+  const current = () => request.slot.request === request;
+  const key = payload.pane && JSON.stringify([workspaceKey(workspace), payload.pane]);
+  const previous = paneRequests.get(key);
+  const open = () => current() && api(agentPath(workspace) + (payload.pane ? '/attach' : ''), payload);
+  // Avoid a stale attach taking control back from a newer request for the same pane.
+  const opening = previous ? previous.catch(() => {}).then(open) : open();
+  if (key) paneRequests.set(key, opening);
+  else request.launch = opening;
+  let channel;
+  try {
+    const opened = await opening;
+    if (!opened) return;
+    channel = opened.channel;
+    if (!current()) {
+      releaseTerminal(channel);
+      return;
+    }
+    const host = request.slot;
+    const shouldFocus = host === normalSlot ? visibleView === 'agent' : host.tile.contains(document.activeElement);
+    const pane = opened.pane || payload.pane;
+    if (pane) sessionStorage.setItem('agent:' + workspaceKey(workspace), pane);
+    detachTerminal(host);
+    openTerminal(host, workspace, pane, channel, opened.label || label);
+    if (host === normalSlot) selectedPane = pane;
+    slotNotice(host, '');
+    if (shouldFocus) focusTerminal(host.terminal);
+  } catch (error) {
+    const host = request.slot;
+    if (channel && host.terminal?.channel === channel) detachTerminal(host);
+    else if (channel) releaseTerminal(channel);
+    if (current()) {
+      if (host === normalSlot) selectedPane = undefined;
+      slotNotice(host, error.message, true);
+    }
+  } finally {
+    if (key && paneRequests.get(key) === opening) paneRequests.delete(key);
+    if (current()) {
+      const host = request.slot;
+      host.request = undefined;
+      renderTerminalSlot(host);
+      if (host === normalSlot) {
+        renderAgentTabs();
+        loadAgents(agentWorkspace);
+      }
+    }
   }
 }
 
@@ -746,19 +822,20 @@ function terminalTheme() {
     : {background: '#ffffff', foreground: '#2e2e38', cursor: '#543fde', selectionBackground: '#e4ddff'};
 }
 
-function openTerminal(channel, label) {
-  const panel = byId('terminal-panel');
-  const mount = byId('terminal');
+function openTerminal(slot, workspace, pane, channel, label) {
+  const mount = element('div', '', 'terminal-surface');
   const view = new Terminal({
     cursorBlink: true, fontSize: 13, convertEol: false, scrollback: 3000, theme: terminalTheme()
   });
   const fit = new FitAddon.FitAddon();
-  const session = {channel, label, view, sequence: 0, poll: new AbortController()};
+  const session = {slot, workspace, pane, channel, label, mount, view, fit, sequence: 0, poll: new AbortController()};
+  const active = () => session.slot.terminal === session;
   // One request in flight at a time keeps ordering, but while it is out, queued keystrokes/scrolls are
   // merged so a slow round trip doesn't build a backlog (which made typing lag and scrolling overshoot).
   const queue = [];
   let flushing = false;
   function send(action) {
+    if (!active()) return;
     const last = queue[queue.length - 1];
     if (last && last.type === action.type) {
       if (action.type === 'terminal.input') { last.text += action.text; return flush(); }
@@ -776,28 +853,28 @@ function openTerminal(channel, label) {
     if (flushing) return;
     flushing = true;
     try {
-      while (queue.length && terminal === session) {
+      while (queue.length && active()) {
         const {text, ...action} = queue.shift();
         try {
           if (action.type !== 'terminal.input') {
             await api('terminals/' + channel, action);
             continue;
           }
-          for (let pos = 0; pos < text.length; pos += 8000) {
+          for (let pos = 0; pos < text.length && active(); pos += 8000) {
             await api('terminals/' + channel, {type: action.type, bytes: encodeInput(text.slice(pos, pos + 8000))});
           }
         } catch (error) {
-          if (terminal === session) agentNotice(error.message, true);
+          if (active()) slotNotice(session.slot, error.message, true);
         }
       }
     } finally {
       flushing = false;
     }
   }
-  terminal = session;
   view.loadAddon(fit);
-  byId('terminal-title').textContent = label;
-  panel.hidden = false;
+  slot.terminal = session;
+  slot.mount.append(mount);
+  renderTerminalSlot(slot);
   view.open(mount);
   view.onData(value => {
     send({type: 'terminal.input', text: value});
@@ -805,10 +882,9 @@ function openTerminal(channel, label) {
   view.onResize(({cols, rows}) => send({
     type: 'terminal.resize', cols: Math.max(10, Math.min(350, cols)), rows: Math.max(4, Math.min(140, rows))
   }));
-  session.fit = fit;
   // Pasted images: the agent runs in the workspace, so it can't see this browser's clipboard. Upload the
   // image to the workspace, which types its file path into the pane (both Claude Code and Codex attach it).
-  session.paste = async event => {
+  const paste = async event => {
     const file = [...event.clipboardData?.files || []].find(item => item.type.startsWith('image/'));
     if (!file) return;
     event.preventDefault();
@@ -816,16 +892,16 @@ function openTerminal(channel, label) {
     try {
       send({type: 'terminal.image', bytes: await imageToBase64(file)});
     } catch (error) {
-      agentNotice(error.message, true);
+      if (active()) slotNotice(session.slot, error.message, true);
     }
   };
-  mount.addEventListener('paste', session.paste, true);
+  mount.addEventListener('paste', paste, true);
   // Herdr routes wheel input to either the terminal app or its scrollback.
   const screen = mount.querySelector('.xterm-screen');
   let wheelLines = 0;
   let wheelTimer;
   let wheelCell;
-  session.wheel = event => {
+  const wheel = event => {
     if (!event.deltaY) return;
     const bounds = screen.getBoundingClientRect();
     if (!bounds.width || !bounds.height) return;
@@ -848,22 +924,27 @@ function openTerminal(channel, label) {
       send({type: 'terminal.scroll', direction: steps < 0 ? 'up' : 'down', lines, ...wheelCell});
     }, 40);
   };
-  mount.addEventListener('wheel', session.wheel, {capture: true, passive: false});
-  session.resize = new ResizeObserver(() => { if (visibleView === 'agent') fit.fit(); });
-  session.resize.observe(mount);
-  fit.fit();
+  mount.addEventListener('wheel', wheel, {capture: true, passive: false});
+  const resize = new ResizeObserver(() => { if (mount.offsetWidth && mount.offsetHeight) fit.fit(); });
+  resize.observe(mount);
+  session.cleanup = () => {
+    clearTimeout(wheelTimer);
+    resize.disconnect();
+    mount.removeEventListener('wheel', wheel, true);
+    mount.removeEventListener('paste', paste, true);
+  };
+  if (mount.offsetWidth && mount.offsetHeight) fit.fit();
   send({type: 'terminal.resize', cols: Math.max(10, Math.min(350, view.cols)), rows: Math.max(4, Math.min(140, view.rows))});
-  view.focus();
   pumpTerminal(session);
 }
 
 async function pumpTerminal(session) {
-  if (terminal !== session) return;
+  if (session.slot.terminal !== session) return;
   try {
     const result = await api(
       'terminals/' + session.channel + '?wait=12&after=' + session.sequence, undefined, session.poll.signal
     );
-    if (terminal !== session) return;
+    if (session.slot.terminal !== session) return;
     for (const frame of result.frames) {
       session.view.write(decodeFrame(frame.bytes));
       session.sequence = frame.seq;
@@ -873,53 +954,257 @@ async function pumpTerminal(session) {
       pumpTerminal(session);
       return;
     }
-    detachTerminal();
-    selectedPane = undefined;
-    renderAgentTabs();
-    agentNotice('The terminal disconnected. Select the agent to attach again.', true);
+    terminalDisconnected(session);
   } catch (error) {
-    if (terminal !== session) return;
+    if (session.slot.terminal !== session) return;
     // A suspended/idle tab drops the long-poll with a bare network TypeError; back off and retry the channel.
     if (error instanceof TypeError && (session.failures = (session.failures || 0) + 1) <= 4) {
       setTimeout(() => pumpTerminal(session), 1000 * session.failures);
       return;
     }
-    const pane = selectedPane;
-    detachTerminal();
-    selectedPane = undefined;
-    renderAgentTabs();
-    // Channel is gone (expired while away): silently re-attach to the same pane, at most once per 30s.
-    if (pane && Date.now() - lastRecovery > 30000) {
-      lastRecovery = Date.now();
-      launchAgent({pane}, session.label);
-      return;
-    }
-    agentNotice(error.message, true);
+    terminalDisconnected(session, error);
   }
 }
 
-function detachTerminal() {
-  if (!terminal) return;
-  const session = terminal;
-  terminal = null;
+function terminalDisconnected(session, error) {
+  const {slot, workspace, pane, label} = session;
+  const hadFocus = session.mount.contains(document.activeElement);
+  detachTerminal(slot);
+  if (slot === normalSlot) {
+    selectedPane = undefined;
+    renderAgentTabs();
+  } else if (hadFocus) {
+    slot.add.focus({preventScroll: true});
+  }
+  if (slot.request) return;
+  // An expired channel can be reattached to the same pane, at most once per slot every 30s.
+  if (error && pane && Date.now() - (slot.lastRecovery || 0) > 30000) {
+    slot.lastRecovery = Date.now();
+    if (slot === normalSlot) launchAgent({pane}, label);
+    else connectAgent(slot, workspace, {pane}, label);
+    return;
+  }
+  const message = slot === normalSlot ? 'Select the agent to attach again.' : 'Choose a running session to continue.';
+  slotNotice(slot, `${error?.message || 'The terminal disconnected.'} ${message}`, true);
+}
+
+function releaseTerminal(channel) {
+  api('terminals/' + channel, {type: 'terminal.release'}).catch(() => {});
+}
+
+function detachTerminal(slot) {
+  const session = slot.terminal;
+  if (!session) return;
+  slot.terminal = undefined;
   session.poll.abort();
-  session.resize.disconnect();
-  byId('terminal').removeEventListener('wheel', session.wheel, {capture: true});
-  byId('terminal').removeEventListener('paste', session.paste, true);
+  session.cleanup?.();
   session.view.dispose();
-  byId('terminal-panel').hidden = true;
-  byId('terminal').replaceChildren();
-  api('terminals/' + session.channel, {type: 'terminal.release'}).catch(() => {});
+  session.mount.remove();
+  renderTerminalSlot(slot);
+  releaseTerminal(session.channel);
 }
 
 byId('terminal-detach').addEventListener('click', () => {
-  attachment++;
-  detachTerminal();
+  normalSlot.request = undefined;
+  detachTerminal(normalSlot);
   selectedPane = undefined;
   autoAttach = false;
   renderAgentTabs();
   loadAgents(agentWorkspace);
 });
+
+function iconButton(label, action, icon, className) {
+  const control = button('', action, className);
+  control.title = label;
+  control.setAttribute('aria-label', label);
+  icon.setAttribute('aria-hidden', 'true');
+  control.append(icon);
+  return control;
+}
+
+function makeTile(side) {
+  const tile = element('section', '', 'session-tile');
+  tile.setAttribute('aria-label', `${side} session tile`);
+  tile.tabIndex = -1;
+  const title = element('span', '', 'tile-title');
+  const subtitle = element('span', '', 'meta');
+  const mount = element('div', '', 'tile-terminal');
+  const status = element('p', '', 'tile-status');
+  status.setAttribute('role', 'status');
+  const slot = {tile, title, subtitle, mount, status};
+  const label = element('div', '', 'tile-label');
+  label.append(title, subtitle);
+  const actions = element('div', '', 'tile-actions');
+  const maximize = element('span', '', 'maximize-icon');
+  for (let i = 0; i < 4; i++) maximize.append(element('i'));
+  slot.change = iconButton('Change session', () => openSessionPicker(slot), element('span', '⇄'));
+  slot.full = iconButton('Open full width', () => {
+    const session = slot.terminal;
+    showAgents(session.workspace, session);
+  }, maximize);
+  slot.change.setAttribute('aria-haspopup', 'dialog');
+  actions.append(slot.change, slot.full);
+  const header = element('div', '', 'terminal-bar tile-heading');
+  header.append(label, actions);
+  slot.empty = element('div', '', 'tile-empty');
+  slot.add = button('Add session', () => openSessionPicker(slot), 'tile-add');
+  slot.add.setAttribute('aria-haspopup', 'dialog');
+  slot.empty.append(slot.add);
+  tile.append(header, status, slot.empty, mount);
+  tile.addEventListener('pointerenter', event => {
+    if (event.pointerType === 'mouse' && !event.buttons && !document.querySelector('dialog[open]')) {
+      if (slot.terminal) focusTerminal(slot.terminal);
+      else tile.focus({preventScroll: true});
+    }
+  });
+  renderTerminalSlot(slot);
+  slotNotice(slot, '');
+  return slot;
+}
+
+function renderTerminalSlot(slot) {
+  const {terminal, request} = slot;
+  if (slot === normalSlot) {
+    byId('terminal-panel').hidden = !terminal;
+    byId('terminal-title').textContent = terminal?.label || '';
+    return;
+  }
+  const item = terminal || request;
+  slot.title.textContent = item?.label || (request ? 'Agent session' : 'No session');
+  slot.title.title = slot.title.textContent;
+  slot.subtitle.textContent = item ? workspaceLabel(item.workspace) : '';
+  slot.subtitle.title = slot.subtitle.textContent;
+  slot.subtitle.hidden = !item;
+  slot.mount.hidden = !terminal;
+  slot.change.hidden = !terminal;
+  slot.full.hidden = !terminal;
+  slot.empty.hidden = Boolean(terminal);
+}
+
+function slotNotice(slot, message, error = false) {
+  if (slot === normalSlot) {
+    agentNotice(message, error);
+    return;
+  }
+  slot.status.textContent = message;
+  slot.status.hidden = !message;
+  slot.status.classList.toggle('error', error);
+}
+
+function focusTerminal(session) {
+  if (!session?.mount.offsetWidth || !session.mount.offsetHeight) return;
+  session.fit.fit();
+  session.view.focus();
+}
+
+function moveTerminal(item, target) {
+  const source = item.slot;
+  const key = item.view ? 'terminal' : 'request';
+  source[key] = undefined;
+  target[key] = item;
+  item.slot = target;
+  if (item.view) target.mount.append(item.mount);
+  renderTerminalSlot(source);
+  renderTerminalSlot(target);
+}
+
+function restoreNormalTerminal(item) {
+  moveTerminal(item, normalSlot);
+  autoAttach = false;
+  selectedPane = item.pane;
+  byId('agent-empty').hidden = true;
+  agentNotice(item.status || '');
+}
+
+function enterSplit() {
+  if (splitActive) return;
+  splitActive = true;
+  const current = normalSlot.terminal || normalSlot.request;
+  const [left] = splitTiles;
+  byId('agent-panel').hidden = true;
+  byId('empty-workspaces').hidden = true;
+  splitPanel.hidden = false;
+  if (current) {
+    moveTerminal(current, left);
+    selectedPane = undefined;
+    slotNotice(left, current.status || '');
+    if (left.terminal) focusTerminal(left.terminal);
+    else left.tile.focus({preventScroll: true});
+  }
+  renderWorkspaceTabs();
+}
+
+function leaveSplit(transfer) {
+  splitActive = false;
+  sessionPicker.close();
+  splitPanel.hidden = true;
+  byId('agent-panel').hidden = !agentWorkspace;
+  for (const slot of splitTiles) {
+    if (slot.request !== transfer) slot.request = undefined;
+    if (slot.terminal !== transfer) detachTerminal(slot);
+    slotNotice(slot, '');
+    slot.lastRecovery = undefined;
+    renderTerminalSlot(slot);
+  }
+}
+
+function workspaceLabel(workspace) {
+  return workspace.name && workspace.name !== workspace.project
+    ? `${workspace.project} / ${workspace.name}` : workspace.project;
+}
+
+async function openSessionPicker(slot) {
+  if (slot.request || sessionPicker.open) return;
+  pickerRequest?.abort();
+  const controller = new AbortController();
+  pickerRequest = controller;
+  pickerList.replaceChildren(element('p', 'Loading running sessions…'));
+  sessionPicker.showModal();
+  const workspaces = data.workspaces.filter(workspace => workspace.running && !changing.has(workspace.id));
+  const launch = splitTiles.find(tile => tile.request?.launch)?.request.launch;
+  const inventories = await Promise.allSettled(workspaces.map(workspace =>
+    api(agentPath(workspace) + '?live=1', undefined, controller.signal)));
+  // A session started just before entering split may appear in inventory before its pane ID is known here.
+  await launch?.catch(() => {});
+  if (controller.signal.aborted || !sessionPicker.open || !splitActive) return;
+  const choices = [];
+  let running = 0;
+  let failed = false;
+  inventories.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      failed = true;
+      return;
+    }
+    const workspace = workspaces[index];
+    for (const item of result.value.running || []) {
+      running++;
+      const inTile = splitTiles.some(tile => [tile.terminal, tile.request].some(open =>
+        open?.pane === item.pane && workspaceKey(open.workspace) === workspaceKey(workspace)));
+      if (inTile) continue;
+      const label = item.title || item.label || agentKind(item);
+      const option = button('', () => {
+        sessionPicker.close();
+        connectAgent(slot, workspace, {pane: item.pane}, label);
+      }, 'session-option');
+      option.append(element('strong', label), element('span', workspaceLabel(workspace), 'meta'));
+      choices.push(option);
+    }
+  });
+  if (!choices.length && !failed) {
+    choices.push(element('p', running ? 'All running sessions are already open in split view.' :
+      'Start or resume an agent from a workspace tab, then return here to add it.'));
+  }
+  if (failed) choices.push(element('p', 'Some workspaces couldn’t be checked. Close and reopen the picker to try again.', 'error'));
+  pickerList.replaceChildren(...choices);
+}
+
+const splitPanel = byId('split-panel');
+const splitTiles = [makeTile('Left'), makeTile('Right')];
+splitPanel.append(...splitTiles.map(slot => slot.tile));
+const sessionPicker = byId('session-picker');
+const pickerList = byId('session-picker-list');
+let pickerRequest;
+sessionPicker.addEventListener('close', () => { if (!sessionPicker.open) pickerRequest?.abort(); });
 
 function confirmWorkspaceAction(workspace, action) {
   const deleting = action === 'delete';
@@ -1150,7 +1435,9 @@ function setTheme(theme) {
   const dark = theme === 'dark';
   themeControl.setAttribute('aria-pressed', String(dark));
   themeControl.textContent = dark ? 'Light mode' : 'Dark mode';
-  if (terminal) terminal.view.options.theme = terminalTheme();
+  for (const slot of [normalSlot, ...splitTiles]) {
+    if (slot.terminal) slot.terminal.view.options.theme = terminalTheme();
+  }
 }
 const systemTheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 setTheme(localStorage.getItem('workspace-sessions-theme') || systemTheme);
