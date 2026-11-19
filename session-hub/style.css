@@ -72,7 +72,8 @@ button:disabled { opacity: .5; cursor: default; }
 .agent-kind { font-weight: 650; font-size: .75rem; color: var(--muted); }
 .agent-tab-title { max-width: 202px; overflow: hidden; text-overflow: ellipsis; }
 .agent-dot { height: 7px; width: 7px; border-radius: 50%; background: var(--muted); opacity: .65; }
-.agent-dot[data-state=working], .agent-dot[data-state=starting] { background: var(--accent-text); opacity: 1; }
+.workspace-tab .agent-dot { display: inline-block; margin-left: 8px; vertical-align: middle; }
+.agent-dot[data-state=working],.agent-dot[data-state=starting] { background: var(--accent-text); opacity: 1; }
 .agent-dot[data-state=done], .agent-dot[data-state=idle] { background: var(--success); opacity: 1; }
 .agent-dot[data-state=blocked] { background: var(--warning); opacity: 1; }
 .ide-link { margin-left: 2px; flex-shrink: 0; }
