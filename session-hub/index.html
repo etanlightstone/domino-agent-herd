@@ -89,8 +89,9 @@
   <p id="setup-owner" class="meta"></p>
   <p id="setup-feedback" role="status"></p>
   <div id="setup-options" hidden>
+    <p id="setup-sharing-warning"><strong>Keep this App owner-only.</strong> Anyone with access can manage workspaces and agent sessions using the project owner’s permissions. Review the App’s sharing settings in Domino before continuing.</p>
     <div class="actions">
-      <button id="setup-create" type="button" class="primary">Create private environment</button>
+      <button id="setup-create" type="button" class="primary" aria-describedby="setup-sharing-warning">Create private environment</button>
       <a id="setup-environment-link" target="_blank" rel="noopener" hidden>Open environment in Domino</a>
     </div>
     <form id="setup-link">
@@ -98,7 +99,7 @@
         <input name="environmentId" required pattern="[0-9a-f]{24}" spellcheck="false">
       </label>
       <p class="meta">Use an environment whose pre-run script points to this App.</p>
-      <div><button type="submit">Link environment</button></div>
+      <div><button type="submit" aria-describedby="setup-sharing-warning">Link environment</button></div>
     </form>
   </div>
 </dialog>

@@ -196,10 +196,6 @@ def app_for_setup(browser_url):
                                if candidate.get(key)}:
             continue
         details = candidate if match else domino(f"/api/apps/v1/apps/{candidate['id']}")
-        access = details["accessControl"]
-        allowed = {entry["userId"] for entry in access["accessStatuses"] if entry["status"] == "ALLOWED"}
-        if access["visibility"] != "GRANT_BASED_STRICT" or allowed - {details["project"]["ownerId"]}:
-            abort(403, "Restrict this App to its project owner before setting up agent sessions.")
         if urlsplit(details["url"]).scheme != "https":
             abort(409, "The private App needs an HTTPS URL for workspace connectors.")
         return details
