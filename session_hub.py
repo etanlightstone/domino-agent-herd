@@ -769,7 +769,12 @@ def terminal_input(channel):
         direction, lines = action.get("direction"), action.get("lines")
         if direction not in ("up", "down") or type(lines) is not int or not 1 <= lines <= 200:
             abort(400, "Invalid terminal scroll.")
+        column, row = action.get("column"), action.get("row")
         action = {"type": kind, "direction": direction, "lines": lines}
+        if column is not None or row is not None:
+            if type(column) is not int or type(row) is not int or not (0 <= column < 350 and 0 <= row < 140):
+                abort(400, "Invalid terminal scroll position.")
+            action.update(column=column, row=row)
     elif kind == "terminal.release":
         action = {"type": kind}
     else:

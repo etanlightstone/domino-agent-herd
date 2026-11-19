@@ -660,20 +660,32 @@ function openTerminal(channel, label) {
     type: 'terminal.resize', cols: Math.max(10, Math.min(350, cols)), rows: Math.max(4, Math.min(140, rows))
   }));
   session.fit = fit;
-  // Herdr keeps the scrollback, so wheel events scroll the pane there instead of xterm's own buffer.
+  // Herdr routes wheel input to either the terminal app or its scrollback.
+  const screen = mount.querySelector('.xterm-screen');
   let wheelLines = 0;
   let wheelTimer;
+  let wheelCell;
   session.wheel = event => {
+    if (!event.deltaY) return;
+    const bounds = screen.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
     event.preventDefault();
     event.stopPropagation();
+    const column = Math.floor((event.clientX - bounds.left) * view.cols / bounds.width);
+    const row = Math.floor((event.clientY - bounds.top) * view.rows / bounds.height);
+    wheelCell = {
+      column: Math.max(0, Math.min(349, view.cols - 1, column)),
+      row: Math.max(0, Math.min(139, view.rows - 1, row))
+    };
     const step = event.deltaMode === 1 ? 1 : event.deltaMode === 2 ? view.rows : 17;
     wheelLines += event.deltaY / step;
     wheelTimer ??= setTimeout(() => {
       wheelTimer = undefined;
-      const lines = Math.min(200, Math.round(Math.abs(wheelLines)));
-      const direction = wheelLines < 0 ? 'up' : 'down';
-      wheelLines = 0;
-      if (lines) send({type: 'terminal.scroll', direction, lines});
+      const steps = Math.trunc(wheelLines);
+      const lines = Math.min(200, Math.abs(steps));
+      if (!lines) return;
+      wheelLines -= steps;
+      send({type: 'terminal.scroll', direction: steps < 0 ? 'up' : 'down', lines, ...wheelCell});
     }, 40);
   };
   mount.addEventListener('wheel', session.wheel, {capture: true, passive: false});
