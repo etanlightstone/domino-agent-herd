@@ -367,8 +367,6 @@ def read_terminal(channel, child):
 
 
 def attach(pane, channel):
-    if not re.fullmatch(r"w[0-9]+:p[0-9]+", pane):
-        raise RuntimeError("That agent pane is unavailable.")
     current = next((row for row in herdr("pane", "list")["panes"] if row["pane_id"] == pane), None)
     tabs = herdr("tab", "list")["tabs"]
     if not current or not any(tab["tab_id"] == current["tab_id"] and

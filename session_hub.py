@@ -734,7 +734,8 @@ def launch_agent(pid, wid):
 @app.post("/api/projects/<pid>/workspaces/<wid>/agents/attach")
 def open_agent(pid, wid):
     pane = body().get("pane")
-    if not isinstance(pane, str) or not re.fullmatch(r"w[0-9]+:p[0-9]+", pane):
+    # Herdr pane IDs are opaque. The connector checks that the ID belongs to a live agent tab.
+    if not isinstance(pane, str) or not 0 < len(pane) <= 128:
         abort(400, "Select a running agent pane.")
     return jsonify(channel=broker.connect_terminal(running_workspace(pid, wid), pane))
 
