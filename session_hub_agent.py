@@ -40,6 +40,10 @@ AGENT_FLAGS = {
     "claude": ("--dangerously-skip-permissions",),
 }
 ENTRY = re.compile(r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
+AGENT_BIN = Path.home() / ".cache/domino-herdr/agent-bin"
+# Sign-in the App provides at launch. Claude Code tokens are kept per run, so a later run
+# starts from the token Domino gives it rather than one saved during an earlier run.
+CREDENTIALS = Path.home() / ".cache/domino-herdr/credentials"
 os.environ["PATH"] = str(Path.home() / ".local/bin") + ":" + os.environ["PATH"]
 
 
@@ -55,7 +59,7 @@ def herdr(*args):
 def agent_restore_environment():
     # Herdr's native cold restore invokes the agent by name with its saved session ID.
     # Give this Herdr server its own launchers and leave each workspace's CLI installs intact.
-    directory = Path.home() / ".cache/domino-herdr/agent-bin"
+    directory = AGENT_BIN
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     for kind, flags in AGENT_FLAGS.items():
         executable = shutil.which(kind)
@@ -65,6 +69,13 @@ def agent_restore_environment():
             continue
         command = shlex.quote(executable)
         script = "#!/bin/sh\nunset NO_COLOR\n"
+        if kind == "claude":
+            # Prefer a token the App provided during this run over the one Domino set at start.
+            token = shlex.quote(str(CREDENTIALS)) + '/claude-"${DOMINO_RUN_ID:-}"'
+            script += f"""if [ -n "${{DOMINO_RUN_ID:-}}" ] && [ -s {token} ]; then
+  CLAUDE_CODE_OAUTH_TOKEN=$(cat {token}) && export CLAUDE_CODE_OAUTH_TOKEN
+fi
+"""
         for flag in reversed(flags):
             option = shlex.quote(flag)
             script += f"""arg=
@@ -88,6 +99,32 @@ fi
             finally:
                 candidate.unlink(missing_ok=True)
     return {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"}
+
+
+def claude_token():
+    return CREDENTIALS / f"claude-{RUN}"
+
+
+def apply_credential(kind, value):
+    """Use the sign-in saved in the App now. Empty means none is saved there."""
+    if not isinstance(value, str) or len(value) > 30_000:
+        return
+    if kind == "codex":
+        if value:
+            # The bootstrap replaces auth.json only when this login is newer than the workspace's.
+            subprocess.run(["bash", BOOTSTRAP, "codex-auth"], env={**os.environ, "CODEX_AUTH_JSON_B64": value},
+                           timeout=20, check=False, stdout=subprocess.DEVNULL)
+        return
+    CREDENTIALS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for old in CREDENTIALS.glob("claude-*"):
+        if old != claude_token():
+            old.unlink(missing_ok=True)
+    if not value:
+        claude_token().unlink(missing_ok=True)
+        return
+    with NamedTemporaryFile(dir=CREDENTIALS, mode="w", delete=False) as output:
+        output.write(value)
+    os.replace(output.name, claude_token())
 
 
 def ensure_server():
@@ -221,12 +258,15 @@ def claude_saved():
             prompt = entry.get("firstPrompt")
             title = entry.get("customTitle")
             summary = entry.get("summary")
+            generated_title = None
             slug = None
             for row in json_lines(file, 160):
                 cwd = cwd or history_cwd(row.get("cwd"))
                 slug = slug or row.get("slug")
                 if row.get("type") == "custom-title":
                     title = row.get("customTitle") or title
+                elif row.get("type") == "ai-title":
+                    generated_title = row.get("aiTitle") or generated_title
                 elif row.get("type") == "summary":
                     summary = row.get("summary") or summary
                 elif not prompt and row.get("type") == "user" and not row.get("isMeta") and not row.get("isSidechain"):
@@ -239,7 +279,8 @@ def claude_saved():
                 if cwd and title and prompt:
                     break
             if cwd:
-                yield {"id": file.stem, "kind": "claude", "label": history_title(title, summary, prompt, slug),
+                label = history_title(title, summary, prompt, generated_title, slug)
+                yield {"id": file.stem, "kind": "claude", "label": label,
                        "updated": modified, "cwd": cwd}
         except (OSError, TypeError, ValueError, AttributeError):
             continue
@@ -316,9 +357,14 @@ def inventory(include_history=True):
     return {"running": live, "saved": saved[:100]}
 
 
-def launch(kind, conversation):
+def launch(kind, conversation, credential=None):
     if kind not in AGENT_FLAGS:
         raise RuntimeError("Choose Codex or Claude Code.")
+    if credential is not None:
+        try:
+            apply_credential(kind, credential)
+        except (OSError, subprocess.SubprocessError) as failure:
+            print(f"Could not apply the App's {kind} sign-in: {type(failure).__name__}", file=sys.stderr, flush=True)
     snapshot = ensure_server()["snapshot"]
     cwd = str(ROOT)
     saved = None
@@ -332,7 +378,11 @@ def launch(kind, conversation):
         if not saved:
             raise RuntimeError("This conversation is no longer available in the workspace.")
         cwd = saved["cwd"]
-    agent = [kind, *AGENT_FLAGS[kind]]
+    executable = kind
+    # Pane shells put ~/.local/bin ahead of the launchers, so name the launcher that reads the token.
+    if kind == "claude" and claude_token().is_file() and (AGENT_BIN / kind).is_file():
+        executable = str(AGENT_BIN / kind)
+    agent = [executable, *AGENT_FLAGS[kind]]
     if conversation:
         agent.extend(["resume", conversation] if kind == "codex" else ["--resume", conversation])
     elif kind == "claude":
@@ -638,7 +688,7 @@ def handle_agent_action(operation, command):
         if operation == "inventory":
             return inventory(include_history=command.get("include_history", True))
         if operation == "launch":
-            return launch(command["kind"], command.get("conversation"))
+            return launch(command["kind"], command.get("conversation"), command.get("credential"))
         if operation == "attach":
             attach(command["pane"], command["channel"])
             return True
@@ -652,6 +702,8 @@ def prepare():
     except (OSError, subprocess.TimeoutExpired):
         pass
     try:
+        # Refresh launchers for a Herdr server that an earlier connector started in this run.
+        agent_restore_environment()
         ensure_server()
         for kind in ("codex", "claude"):
             try:

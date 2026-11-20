@@ -2,7 +2,8 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 mode=${1:-attach}
-if [[ "$mode" != attach && "$mode" != prepare ]]; then
+# codex-auth applies CODEX_AUTH_JSON_B64 only. The connector uses it for sign-in renewed in the App.
+if [[ "$mode" != attach && "$mode" != prepare && "$mode" != codex-auth ]]; then
   printf 'Usage: bash herdr-workspace.sh [attach|prepare]\n' >&2
   exit 2
 fi
@@ -15,23 +16,48 @@ if [[ -n ${CODEX_AUTH_JSON_B64:-} ]]; then
 import base64
 import json
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+
+
+def refreshed(auth):
+    """When Codex last refreshed this login, or None."""
+    value = auth.get("last_refresh") if isinstance(auth, dict) else None
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?",
+                         value.strip() if isinstance(value, str) else "")
+    if not match:
+        return None
+    zone = "+00:00" if match[3] in (None, "Z") else match[3]
+    return datetime.fromisoformat(f"{match[1]}.{(match[2] or '0')[:6].ljust(6, '0')}{zone}")
+
 
 directory = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 target = directory / "auth.json"
-if not target.is_file() or target.stat().st_size == 0:
-    try:
-        contents = base64.b64decode(os.environ["CODEX_AUTH_JSON_B64"], validate=True)
-        if not isinstance(json.loads(contents), dict):
-            raise ValueError
-    except ValueError:
-        raise SystemExit("Codex auth setup failed. Check CODEX_AUTH_JSON_B64 in Domino.")
-    with NamedTemporaryFile(dir=directory, delete=False) as output:
-        output.write(contents)
-    os.replace(output.name, target)
+try:
+    contents = base64.b64decode(os.environ["CODEX_AUTH_JSON_B64"], validate=True)
+    saved = json.loads(contents)
+    if not isinstance(saved, dict):
+        raise ValueError
+except ValueError:
+    raise SystemExit("Codex auth setup failed. Check CODEX_AUTH_JSON_B64 in Domino.")
+try:
+    current = json.loads(target.read_bytes())
+except (OSError, ValueError):
+    current = None
+# Keep a login Codex refreshed in this workspace. Replace it with a newer one saved in Domino.
+newer, older = refreshed(saved), refreshed(current)
+if isinstance(current, dict) and (newer is None or (older is not None and newer <= older)):
+    raise SystemExit(0)
+with NamedTemporaryFile(dir=directory, delete=False) as output:
+    output.write(contents)
+os.replace(output.name, target)
 PY
+fi
+if [[ "$mode" == codex-auth ]]; then
+  exit 0
 fi
 
 prepare() (

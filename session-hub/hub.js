@@ -126,6 +126,7 @@ function render() {
   renderProjects();
   renderDetail();
   renderSetup();
+  renderCredentialsBanner();
 }
 
 function setupMessage(state, name, mode) {
@@ -154,7 +155,12 @@ function renderSetup() {
       renderSetup();
     }), 5000);
   }
-  if (!setupDetails || !setupDialog.open) return;
+  if (!setupDialog.open) return;
+  const connection = byId('setup-connection-state');
+  connection.textContent = !setupDetails ? '' : ssh || state === 'ready' ? 'Ready'
+    : {building: 'Building…', failed: 'Build failed', unavailable: 'Unavailable'}[state] || 'Needs setup';
+  connection.dataset.done = String(Boolean(setupDetails) && (ssh || state === 'ready'));
+  if (!setupDetails) return;
   byId('setup-feedback').textContent = setupMessage(state, name, mode);
   byId('setup-sharing-warning').hidden = false;
   byId('setup-ssh-mode').hidden = !ssh;
@@ -173,7 +179,7 @@ function renderSetup() {
   byId('setup-link').querySelector('button').disabled = setupBusy;
 }
 
-async function openSetup() {
+async function openSetup({welcome = false, signIn = false, provider} = {}) {
   if (setupDialog.open) return;
   if (!data) {
     try {
@@ -188,7 +194,14 @@ async function openSetup() {
   for (const id of ['setup-options', 'setup-ssh-mode', 'setup-environment', 'setup-sharing-warning']) byId(id).hidden = true;
   byId('setup-owner').textContent = '';
   byId('setup-feedback').textContent = 'Finding this Domino App…';
+  byId('setup-welcome').hidden = !welcome;
+  credentialUI.removing = null;
+  if (provider) credentialUI.open.add(provider);
+  credentialFeedback('');
   setupDialog.showModal();
+  renderSetup();
+  loadCredentials();
+  if (signIn) byId('setup-step-signin').scrollIntoView({block: 'start'});
   try {
     setupDetails = await api('setup?' + new URLSearchParams({appUrl: setupAppUrl}));
     const {owner, appUrl, environment, mode} = setupDetails;
@@ -219,6 +232,321 @@ async function configureConnector(mode, environmentId) {
     renderSetup();
     if (failure) byId('setup-feedback').textContent = failure;
   }
+}
+
+// Agent sign-in. The App saves it to the owner's Domino user environment variables.
+const CODEX_VARIABLE_DIR = '$HOME/.codex-domino';
+const SIGN_IN_GUIDES = {
+  claude: {
+    command: 'claude setup-token',
+    after: 'A browser window opens. Sign in with your Claude account. The terminal then prints a token that starts with sk-ant-oat01-. Copy the whole token.',
+    install: ['No Claude Code on your Mac? Install it first:', 'curl -fsSL https://claude.ai/install.sh | bash'],
+    others: [
+      ['Not on a Mac? The same command works in Linux and Windows terminals.', null],
+    ],
+    paste: 'Paste the token',
+    placeholder: 'sk-ant-oat01-…',
+    lifetime: 'Claude Code tokens last about a year. This App reminds you a month before it expires.',
+    manualLifetime: 'Claude Code tokens last about a year.',
+  },
+  codex: {
+    command: `(export CODEX_HOME="${CODEX_VARIABLE_DIR}"; mkdir -p "$CODEX_HOME" && codex login -c 'cli_auth_credentials_store="file"' && base64 < "$CODEX_HOME/auth.json" | tr -d '\\n' | pbcopy && echo "Copied. Paste it into Workspace Sessions."; rm -rf "$CODEX_HOME")`,
+    after: 'A browser window opens. Sign in with your ChatGPT account. When the terminal says Copied, your sign-in is on the clipboard. This is a separate sign-in for Domino, so Codex on your Mac stays signed in.',
+    install: ['No Codex on your Mac? Install it first:', 'brew install --cask codex'],
+    others: [
+      ['Already signed in to Codex on this Mac? You can copy that sign-in instead:',
+        `base64 < "\${CODEX_HOME:-$HOME/.codex}/auth.json" | tr -d '\\n' | pbcopy`],
+      ['On Linux, remove | pbcopy from the command and copy the text it prints.', null],
+    ],
+    paste: 'Paste with ⌘V',
+    placeholder: 'ewogICJhdXRoX21vZGUi…',
+    lifetime: 'Codex keeps this sign-in fresh. If a workspace asks you to sign in to Codex again, repeat these steps.',
+  },
+};
+const credentialDate = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium'});
+const credentialUI = {loading: false, open: new Set(), removing: null, busy: null, drafts: {}};
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* The page works without saved preferences. */ }
+}
+
+function formatCredentialDate(value) {
+  const [year, month, day] = String(value || '').split('-').map(Number);
+  return year ? credentialDate.format(new Date(year, month - 1, day)) : '';
+}
+
+function credentialProviders() {
+  const providers = data?.credentials?.providers || {};
+  return ['claude', 'codex'].map(key => ({key, ...providers[key]})).filter(provider => provider.name);
+}
+
+function signedIn(provider) {
+  return ['ok', 'expiring'].includes(provider.state);
+}
+
+function credentialStateText(provider) {
+  switch (provider.state) {
+    case 'ok':
+      if (provider.key === 'codex' && provider.account) {
+        return `Signed in as ${provider.account}${provider.plan ? ` (${provider.plan})` : ''}`;
+      }
+      return provider.expiresAt ? `Signed in · renew by ${formatCredentialDate(provider.expiresAt)}` : 'Signed in';
+    case 'expiring': return `Expires around ${formatCredentialDate(provider.expiresAt)} · renew now`;
+    case 'expired': return 'Probably expired · sign in again';
+    case 'invalid': return 'Saved value isn’t a valid sign-in · replace it';
+    case 'missing': return 'Not set up';
+    default: return 'Status unavailable';
+  }
+}
+
+function credentialAttention() {
+  const credentials = data?.credentials;
+  if (!credentials?.available) return null;
+  const providers = credentialProviders();
+  const urgent = providers.find(provider => ['expired', 'invalid', 'expiring'].includes(provider.state));
+  if (urgent) {
+    const message = urgent.state === 'expired'
+      ? `Your ${urgent.name} sign-in has probably expired. Sign in again so new sessions start signed in.`
+      : urgent.state === 'invalid'
+        ? `Your saved ${urgent.name} sign-in can’t be read. Replace it in Setup.`
+        : `Your ${urgent.name} sign-in expires around ${formatCredentialDate(urgent.expiresAt)}.`;
+    return {message, action: 'Renew sign-in', provider: urgent.key, dismissible: false};
+  }
+  if (!providers.some(provider => provider.state !== 'missing') && !storageGet('workspace-sessions-signin-dismissed')) {
+    return {message: 'Sign in to Codex or Claude Code once, and every workspace you start is signed in.',
+      action: 'Set up sign-in', dismissible: true};
+  }
+  return null;
+}
+
+function renderCredentialsBanner() {
+  const attention = credentialAttention();
+  byId('credentials-banner').hidden = !attention;
+  if (!attention) return;
+  byId('credentials-banner-status').textContent = attention.message;
+  byId('credentials-banner-open').textContent = attention.action;
+  byId('credentials-banner-open').dataset.provider = attention.provider || '';
+  byId('credentials-banner-dismiss').hidden = !attention.dismissible;
+}
+
+function commandBlock(command, label) {
+  const block = element('div', '', 'command');
+  const code = element('code', command);
+  const copy = button('Copy', async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      copy.textContent = 'Copied';
+    } catch {
+      getSelection().selectAllChildren(code);
+      copy.textContent = 'Press ⌘C';
+    }
+    setTimeout(() => { copy.textContent = 'Copy'; }, 2000);
+  });
+  copy.setAttribute('aria-label', `Copy ${label}`);
+  block.append(code, copy);
+  return block;
+}
+
+function guideStep(number, ...children) {
+  const step = element('li', '', 'guide-step');
+  const marker = element('span', String(number), 'guide-marker');
+  marker.setAttribute('aria-hidden', 'true');
+  const body = element('div', '', 'guide-body');
+  body.append(...children);
+  step.append(marker, body);
+  return step;
+}
+
+function signInGuide(provider) {
+  const guide = SIGN_IN_GUIDES[provider.key];
+  const credentials = data.credentials;
+  const runIntro = element('p');
+  runIntro.append(element('strong', 'On your Mac,'), ' open Terminal and run:');
+  const install = element('p', guide.install[0] + ' ', 'meta');
+  install.append(element('code', guide.install[1]));
+  const others = element('details', '', 'guide-options');
+  others.append(element('summary', 'Other options'));
+  for (const [text, command] of guide.others) {
+    others.append(element('p', text, 'meta'));
+    if (command) others.append(commandBlock(command, 'alternative command'));
+  }
+  const steps = element('ol', '', 'guide-steps');
+  steps.append(guideStep(1, runIntro, commandBlock(guide.command, `${provider.name} sign-in command`),
+    element('p', guide.after, 'meta'), install, others));
+
+  if (credentials.writable) {
+    const form = element('form', '', 'guide-paste');
+    const field = element('label', `${guide.paste} here`);
+    const input = element('textarea', '', 'secret');
+    input.name = 'value';
+    input.rows = 3;
+    input.required = true;
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    input.placeholder = guide.placeholder;
+    input.value = credentialUI.drafts[provider.key] || '';
+    input.addEventListener('input', () => { credentialUI.drafts[provider.key] = input.value; });
+    field.append(input);
+    const save = element('button', credentialUI.busy === provider.key ? 'Saving…' : `Save ${provider.name} sign-in`, 'primary');
+    save.type = 'submit';
+    save.disabled = Boolean(credentialUI.busy);
+    const actions = element('div', '', 'actions');
+    actions.append(save);
+    if (provider.state !== 'unknown') {
+      actions.append(button('Cancel', () => {
+        credentialUI.open.delete(provider.key);
+        delete credentialUI.drafts[provider.key];
+        renderCredentials();
+      }));
+    }
+    form.append(field, actions, element('p', guide.lifetime, 'meta'));
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      saveCredential(provider, input.value);
+    });
+    steps.append(guideStep(2, form));
+  } else {
+    const where = element('p');
+    where.append('Open ', link('your Domino account settings', credentials.accountUrl),
+      ' and find User environment variables. Set this name, paste the value, then choose Set variable.');
+    steps.append(guideStep(2, where, commandBlock(provider.variable, 'variable name'),
+      element('p', 'This Domino deployment doesn’t let the App save the sign-in for you. ' +
+        (guide.manualLifetime || guide.lifetime), 'meta')));
+  }
+  return steps;
+}
+
+function credentialCard(provider) {
+  const card = element('section', '', 'provider');
+  card.dataset.state = provider.state || 'unknown';
+  card.dataset.providerCard = provider.key;
+  const heading = element('div', '', 'provider-heading');
+  const title = element('div', '', 'provider-title');
+  const state = element('span', credentialStateText(provider), 'provider-state');
+  state.dataset.state = card.dataset.state;
+  const details = [provider.variable];
+  if (provider.savedAt) details.push(`saved ${formatCredentialDate(provider.savedAt)}`);
+  else if (provider.key === 'claude' && provider.state === 'ok') {
+    details.push('saved outside this App, so its renewal date is unknown. Replace it here to get a reminder');
+  }
+  title.append(element('strong', provider.name), state, element('p', details.join(' · '), 'meta'));
+  const actions = element('div', '', 'actions');
+  // Agents that aren't set up stay collapsed, so people expand only the ones they use.
+  const open = credentialUI.open.has(provider.key) || provider.state === 'unknown';
+  const writable = data.credentials.writable;
+  if (credentialUI.removing === provider.key) {
+    actions.append(
+      element('span', `Remove ${provider.name} from Domino?`, 'meta'),
+      button('Remove', () => removeCredential(provider), 'confirm-danger'),
+      button('Cancel', () => { credentialUI.removing = null; renderCredentials(); }));
+  } else if (!open) {
+    const missing = provider.state === 'missing';
+    const renew = ['expiring', 'expired', 'invalid'].includes(provider.state);
+    actions.append(button(missing ? `Set up ${provider.name}` : renew ? 'Renew' : 'Replace', () => {
+      credentialUI.open.add(provider.key);
+      renderCredentials();
+      byId('credential-providers').querySelector(`[data-provider-card="${provider.key}"] .command button`)?.focus();
+    }, missing || renew ? 'primary' : ''));
+    if (writable && !missing) {
+      actions.append(button('Remove', () => { credentialUI.removing = provider.key; renderCredentials(); }, 'danger'));
+    }
+  }
+  for (const control of actions.querySelectorAll('button')) control.disabled = Boolean(credentialUI.busy);
+  heading.append(title, actions);
+  card.append(heading);
+  if (open) card.append(signInGuide(provider));
+  return card;
+}
+
+function renderCredentials() {
+  renderCredentialsBanner();
+  if (!setupDialog.open) return;
+  const container = byId('credential-providers');
+  const credentials = data?.credentials;
+  const providers = credentialProviders();
+  const stateChip = byId('setup-signin-state');
+  if (!credentials) {
+    container.replaceChildren(element('p', credentialUI.loading ? 'Checking your saved sign-in…'
+      : 'Could not check your saved sign-in. Close Setup and try again.', 'meta'));
+    stateChip.textContent = '';
+    return;
+  }
+  const ready = providers.filter(signedIn);
+  stateChip.textContent = !credentials.available ? 'Set up in Domino'
+    : ready.length ? `${ready.map(provider => provider.name).join(' and ')} ready` : 'Not set up';
+  stateChip.dataset.done = String(ready.length > 0);
+  const focused = document.activeElement?.closest?.('[data-provider-card]')?.dataset.providerCard;
+  container.replaceChildren(...providers.map(credentialCard));
+  if (focused) container.querySelector(`[data-provider-card="${focused}"] textarea`)?.focus();
+}
+
+function credentialFeedback(message, error = false) {
+  const feedback = byId('credentials-feedback');
+  feedback.textContent = message;
+  feedback.hidden = !message;
+  feedback.classList.toggle('error', error);
+  feedback.classList.toggle('success', Boolean(message) && !error);
+}
+
+async function loadCredentials() {
+  credentialUI.loading = true;
+  renderCredentials();
+  try {
+    const credentials = await api('credentials?refresh=1');
+    data.credentials = credentials;
+  } catch (error) {
+    credentialFeedback(error.message, true);
+  } finally {
+    credentialUI.loading = false;
+    renderCredentials();
+  }
+}
+
+async function saveCredential(provider, value) {
+  if (credentialUI.busy) return;
+  credentialUI.busy = provider.key;
+  credentialFeedback('');
+  renderCredentials();
+  try {
+    const credentials = await api('credentials', {provider: provider.key, value});
+    data.credentials = credentials;
+    credentialUI.open.delete(provider.key);
+    delete credentialUI.drafts[provider.key];
+    credentialFeedback(`${provider.name} sign-in saved to Domino. New ${provider.name} sessions you open here use it, including in running workspaces. If a workspace still asks you to sign in, restart it.`);
+  } catch (error) {
+    credentialFeedback(error.message, true);
+  } finally {
+    credentialUI.busy = null;
+    renderCredentials();
+  }
+}
+
+async function removeCredential(provider) {
+  if (credentialUI.busy) return;
+  credentialUI.busy = provider.key;
+  credentialUI.removing = null;
+  credentialFeedback('');
+  renderCredentials();
+  try {
+    const credentials = await api('credentials', {provider: provider.key, remove: true});
+    data.credentials = credentials;
+    credentialFeedback(`${provider.name} sign-in removed from Domino. Workspaces that are already signed in stay signed in until they restart.`);
+  } catch (error) {
+    credentialFeedback(error.message, true);
+  } finally {
+    credentialUI.busy = null;
+    renderCredentials();
+  }
+}
+
+function needsFirstRunSetup() {
+  if (data.setup?.state === 'unconfigured') return true;
+  return Boolean(data.credentials?.available) && !credentialProviders().some(provider => provider.state !== 'missing') &&
+    !storageGet('workspace-sessions-setup-seen');
 }
 
 function renderWorkspaceTabs() {
@@ -1518,8 +1846,19 @@ for (const id of ['workspace-tabs', 'agent-running']) {
     tabs[next].focus();
   });
 }
-byId('connector-settings').addEventListener('click', openSetup);
-byId('connector-setup-open').addEventListener('click', openSetup);
+byId('connector-settings').addEventListener('click', () => openSetup());
+byId('connector-setup-open').addEventListener('click', () => openSetup());
+byId('credentials-banner-open').addEventListener('click', event =>
+  openSetup({signIn: true, provider: event.currentTarget.dataset.provider || undefined}));
+byId('credentials-banner-dismiss').addEventListener('click', () => {
+  storageSet('workspace-sessions-signin-dismissed', '1');
+  renderCredentialsBanner();
+});
+byId('setup-done').addEventListener('click', () => setupDialog.close());
+setupDialog.addEventListener('close', () => {
+  storageSet('workspace-sessions-setup-seen', '1');
+  byId('setup-welcome').hidden = true;
+});
 byId('setup-create').addEventListener('click', () => configureConnector('create'));
 byId('setup-link').addEventListener('submit', event => {
   event.preventDefault();
@@ -1528,7 +1867,7 @@ byId('setup-link').addEventListener('submit', event => {
 byId('refresh').addEventListener('click', () => refresh().then(refreshGit).catch(error => notice(error.message, true)));
 refresh().then(() => {
   notice('');
-  if (data.setup?.state === 'unconfigured') openSetup();
+  if (needsFirstRunSetup()) openSetup({welcome: true});
 }).catch(error => notice(error.message, true));
 
 const themeControl = byId('theme');

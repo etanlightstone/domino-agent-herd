@@ -14,6 +14,7 @@ import requests
 from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
+import session_hub_credentials as credentials
 from session_hub_broker import Broker
 from session_hub_ssh import Bootstrapper, GatewayError, bootstrap_script, run_over_gateway
 
@@ -88,7 +89,8 @@ def prevent_caching(response):
     return response
 
 
-def domino_response(path, method="GET", **kwargs):
+def domino_headers():
+    """Request headers for the project owner's Domino identity, checked once per request."""
     if "domino_headers" not in request.environ:
         token = requests.get("http://127.0.0.1:8899/access-token", timeout=5)
         token.raise_for_status()
@@ -102,10 +104,13 @@ def domino_response(path, method="GET", **kwargs):
         if user["userName"] != owner:
             abort(403, "The hub must run under the project owner's Domino identity.")
         request.environ["domino_headers"] = headers
+    return request.environ["domino_headers"]
 
+
+def domino_response(path, method="GET", **kwargs):
     response = requests.request(
         method, os.environ["DOMINO_API_HOST"] + path,
-        headers=request.environ["domino_headers"], timeout=(4, 30), allow_redirects=False, **kwargs
+        headers=domino_headers(), timeout=(4, 30), allow_redirects=False, **kwargs
     )
     if not response.ok or response.is_redirect:
         raise DominoError(response)
@@ -368,6 +373,119 @@ def update_setup():
         return jsonify(environment=environment_status())
 
 
+# Agent sign-in lives in the owner's Domino user environment variables, so it reaches every
+# workspace the owner starts. Secret values stay on this server; the browser only sees status.
+account = {"checked": 0.0, "page": None, "host": None}
+account_reads = Lock()
+account_writes = Lock()
+ACCOUNT_TTL = 60
+
+
+def load_account_page():
+    """Read Domino's account page through the internal API host, or the public URL if that fails."""
+    hosts = [account["host"], os.environ["DOMINO_API_HOST"].rstrip("/"), domino_url]
+    for host in dict.fromkeys(host for host in hosts if host):
+        try:
+            response = requests.get(host + credentials.ACCOUNT_PAGE, headers=domino_headers(),
+                                    timeout=(4, 20), allow_redirects=False)
+        except requests.RequestException:
+            continue
+        if response.status_code == 200:
+            page = credentials.AccountPage(response.text)
+            if page.readable:
+                account["host"] = host
+                return page
+    return None
+
+
+def account_page(refresh=False):
+    """User environment variables, cached briefly. None when this deployment's page can't be read."""
+    with account_reads:
+        if refresh or time.monotonic() - account["checked"] > ACCOUNT_TTL:
+            account.update(page=load_account_page(), checked=time.monotonic())
+        return account["page"]
+
+
+def credential_status(refresh=False):
+    page = account_page(refresh)
+    providers = {}
+    for key, spec in credentials.PROVIDERS.items():
+        status = (credentials.provider_status(key, page.variables.get(spec["variable"]))
+                  if page else {"state": "unknown"})
+        providers[key] = {**spec, **status}
+    return {"available": bool(page), "writable": bool(page and page.writable),
+            "accountUrl": domino_url + credentials.ACCOUNT_SECTION, "providers": providers}
+
+
+def credential_summary():
+    try:
+        return credential_status()
+    except (requests.RequestException, DominoError, HTTPException):
+        return None
+
+
+def save_user_variable(path, fields):
+    page = account_page(refresh=True)
+    if not page or not page.writable:
+        abort(409, "This Domino deployment doesn’t let the App save user environment variables. "
+                   "Add it in your Domino account settings instead.")
+    if page.csrf:
+        fields = {**fields, "csrfToken": page.csrf}
+    try:
+        response = requests.post(account["host"] + path, headers=domino_headers(), data=fields,
+                                 timeout=(4, 20), allow_redirects=False)
+    except requests.RequestException:
+        abort(502, "Could not reach Domino to save your sign-in. Try again.")
+    if response.status_code not in {200, 302, 303}:
+        abort(409, f"Domino didn’t save your sign-in (HTTP {response.status_code}). "
+                   "Add it in your Domino account settings instead.")
+
+
+@app.get("/api/credentials")
+def get_credentials():
+    return jsonify(credential_status(refresh=request.args.get("refresh") == "1"))
+
+
+@app.post("/api/credentials")
+def update_credentials():
+    data = body()
+    provider = data.get("provider")
+    if provider not in credentials.PROVIDERS:
+        abort(400, "Choose Codex or Claude Code.")
+    variable = credentials.PROVIDERS[provider]["variable"]
+    remove = data.get("remove") is True
+    value = None
+    if not remove:
+        try:
+            value = credentials.NORMALIZE[provider](data.get("value"))
+        except ValueError as error:
+            abort(400, str(error))
+    with account_writes:
+        if remove:
+            save_user_variable(credentials.UNSET_VARIABLE, {"userEnvironmentVariableName": variable})
+        else:
+            save_user_variable(credentials.SET_VARIABLE, {
+                "userEnvironmentVariableName": variable,
+                "userEnvironmentVariableValue": value,
+                "userEnvironmentVariableDescription": credentials.saved_description(),
+            })
+        page = account_page(refresh=True)
+    # Domino redirects back to the account page whether or not the change worked.
+    if not page or (page.variables.get(variable) or {}).get("value") != value:
+        abort(409, "Domino didn’t confirm the change. Check your user environment variables in "
+                   "your Domino account settings.")
+    return jsonify(credential_status())
+
+
+def launch_credential(kind):
+    """The saved sign-in for kind, so new sessions in running workspaces get renewed credentials."""
+    try:
+        page = account_page()
+    except (requests.RequestException, DominoError, HTTPException):
+        return None
+    return credentials.stored_value(kind, page) if page else None
+
+
 def connector_compatibility(config):
     environment = config.get("environment") or {}
     identifier = environment.get("id")
@@ -466,6 +584,7 @@ def get_inventory():
     return jsonify(
         projects=[project_summary(item) for item in visible], workspaces=workspaces,
         dominoUrl=domino_url, hubProject=project_id, user=owner, managedAvailable=setup["state"] == "ready", setup=setup,
+        credentials=credential_summary(),
     )
 
 
@@ -882,7 +1001,10 @@ def launch_agent(pid, wid):
         (not isinstance(conversation, str) or not re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", conversation))):
         abort(400, "Choose Codex or Claude Code.")
     run = running_workspace(pid, wid)
-    session = broker.call(run, "launch", kind=kind, conversation=conversation)
+    credential = launch_credential(kind)
+    # Connectors from earlier App versions ignore the credential.
+    extra = {"credential": credential} if credential is not None else {}
+    session = broker.call(run, "launch", kind=kind, conversation=conversation, **extra)
     return jsonify(channel=broker.connect_terminal(run, session["pane"]), label=session["label"], pane=session["pane"])
 
 

@@ -17,7 +17,7 @@
   <div class="nav-right">
     <a class="help-link" href="https://github.com/etanlightstone/domino-agent-herd#readme" target="_blank" rel="noopener noreferrer" title="Help: setup and usage guide (opens the README in a new tab)" aria-label="Help (opens the README in a new tab)">?</a>
     <button id="browse-projects" type="button">Browse projects</button>
-    <button id="connector-settings" type="button">Connector setup</button>
+    <button id="connector-settings" type="button">Setup</button>
     <button id="refresh" type="button">Refresh</button>
     <button id="theme" type="button" aria-pressed="false">Dark mode</button>
   </div>
@@ -33,6 +33,13 @@
   <div id="connector-setup-banner" class="setup-banner" hidden>
     <span id="connector-setup-status" role="status"></span>
     <button id="connector-setup-open" type="button" class="primary">Set up agent sessions</button>
+  </div>
+  <div id="credentials-banner" class="setup-banner" hidden>
+    <span id="credentials-banner-status" role="status"></span>
+    <div class="actions">
+      <button id="credentials-banner-dismiss" type="button" hidden>Not now</button>
+      <button id="credentials-banner-open" type="button" class="primary">Set up sign-in</button>
+    </div>
   </div>
   <section id="empty-workspaces" class="empty" hidden>
     <h1>No running workspaces</h1>
@@ -101,34 +108,57 @@
   <input id="history-search" type="search" placeholder="Search titles, agents, or IDs" aria-label="Search conversation history">
   <div id="history-list" aria-live="polite"></div>
 </dialog>
-<dialog id="setup-dialog" aria-labelledby="setup-heading">
+<dialog id="setup-dialog" class="setup-dialog" aria-labelledby="setup-heading">
   <div class="dialog-heading">
-    <h2 id="setup-heading">Connector setup</h2>
+    <h2 id="setup-heading">Setup</h2>
     <form method="dialog"><button>Close</button></form>
   </div>
-  <p id="setup-owner" class="meta"></p>
-  <p id="setup-feedback" role="status"></p>
+  <p id="setup-welcome" class="setup-welcome" hidden>Welcome! Two quick steps get Codex and Claude Code running in your Domino workspaces. You can come back to <strong>Setup</strong> at any time.</p>
   <p id="setup-sharing-warning" hidden><strong>Keep this App owner-only.</strong> Anyone with access can manage workspaces and agent sessions using the project owner’s permissions. Review the App’s sharing settings in Domino.</p>
-  <div id="setup-ssh-mode" hidden>
-    <p>Workspaces you start or resume from this App turn on Domino workspace SSH. The App then connects Codex and Claude Code in each workspace’s own compute environment. Environments need <code>openssh-server</code>, which Domino Standard Environments include.</p>
-  </div>
-  <section id="setup-environment" hidden>
-    <h3 id="setup-environment-heading">Connector environment</h3>
-    <p class="meta">Workspace SSH is off in this Domino deployment, so workspaces connect through an environment whose pre-run script starts the connector.</p>
-    <div id="setup-options" hidden>
-      <div class="actions">
-        <button id="setup-create" type="button" class="primary" aria-describedby="setup-sharing-warning">Create private environment</button>
-        <a id="setup-environment-link" target="_blank" rel="noopener" hidden>Open environment in Domino</a>
+  <ol class="setup-steps">
+    <li class="setup-step" id="setup-step-connection">
+      <div class="step-heading">
+        <span class="step-marker" aria-hidden="true">1</span>
+        <h3>Workspace connection</h3>
+        <span id="setup-connection-state" class="step-state"></span>
       </div>
-      <form id="setup-link">
-        <label>Existing connector environment ID
-          <input name="environmentId" required pattern="[0-9a-f]{24}" spellcheck="false">
-        </label>
-        <p class="meta">Use an environment whose pre-run script points to this App.</p>
-        <div><button type="submit" aria-describedby="setup-sharing-warning">Link environment</button></div>
-      </form>
-    </div>
-  </section>
+      <p id="setup-owner" class="meta"></p>
+      <p id="setup-feedback" role="status"></p>
+      <div id="setup-ssh-mode" hidden>
+        <p>Workspaces you start or resume from this App turn on Domino workspace SSH. The App then connects Codex and Claude Code in each workspace’s own compute environment. Environments need <code>openssh-server</code>, which Domino Standard Environments include.</p>
+      </div>
+      <section id="setup-environment" hidden>
+        <h4 id="setup-environment-heading">Connector environment</h4>
+        <p class="meta">Workspace SSH is off in this Domino deployment, so workspaces connect through an environment whose pre-run script starts the connector.</p>
+        <div id="setup-options" hidden>
+          <div class="actions">
+            <button id="setup-create" type="button" class="primary" aria-describedby="setup-sharing-warning">Create private environment</button>
+            <a id="setup-environment-link" target="_blank" rel="noopener" hidden>Open environment in Domino</a>
+          </div>
+          <form id="setup-link">
+            <label>Existing connector environment ID
+              <input name="environmentId" required pattern="[0-9a-f]{24}" spellcheck="false">
+            </label>
+            <p class="meta">Use an environment whose pre-run script points to this App.</p>
+            <div><button type="submit" aria-describedby="setup-sharing-warning">Link environment</button></div>
+          </form>
+        </div>
+      </section>
+    </li>
+    <li class="setup-step" id="setup-step-signin">
+      <div class="step-heading">
+        <span class="step-marker" aria-hidden="true">2</span>
+        <h3>Agent sign-in</h3>
+        <span id="setup-signin-state" class="step-state"></span>
+      </div>
+      <p class="meta">Set up the agents you use: one or both. You sign in on your Mac and paste the result here. The App saves it as a Domino user environment variable, so every workspace you start is already signed in. Return here when a sign-in expires or to add the other agent.</p>
+      <p id="credentials-feedback" role="status" hidden></p>
+      <div id="credential-providers"></div>
+    </li>
+  </ol>
+  <div class="setup-footer">
+    <button id="setup-done" type="button" class="primary">Done</button>
+  </div>
 </dialog>
 <dialog id="dialog"><div id="dialog-body"></div><form method="dialog"><button>Close</button></form></dialog>
 <dialog id="block-drop" class="block-drop" aria-labelledby="block-drop-title">
