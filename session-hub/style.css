@@ -261,3 +261,5 @@ button.confirm-danger:hover { background: #a40922; color: white; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 .connector-update { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 6px 12px; color: var(--warning); background: var(--warning-bg); font-size: .83rem; }
 .connector-update button { padding: 3px 9px; font-size: .82rem; }
+.signin-alert { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 7px 12px; color: var(--ink); background: var(--warning-bg); border-bottom: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border)); font-size: .85rem; }
+.signin-alert button { padding: 3px 9px; font-size: .82rem; }

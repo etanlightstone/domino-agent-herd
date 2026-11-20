@@ -72,6 +72,14 @@
       <span>This workspace runs an older connector, so renewed sign-in and other App updates reach it after a restart.</span>
       <button id="connector-update-button" type="button" aria-haspopup="dialog">Restart workspace</button>
     </div>
+    <div id="signin-alert" class="signin-alert" role="alert" hidden>
+      <span id="signin-alert-text"></span>
+      <div class="actions">
+        <button id="signin-alert-renew" type="button" aria-haspopup="dialog">Renew sign-in</button>
+        <button id="signin-alert-resume" type="button" class="primary">Resume with new sign-in</button>
+        <button id="signin-alert-dismiss" type="button">Dismiss</button>
+      </div>
+    </div>
     <p id="agent-summary" role="status" hidden></p>
     <div id="agent-view">
       <section id="agent-restart" class="empty-state" aria-labelledby="agent-restart-title" hidden>

@@ -61,6 +61,8 @@ The Codex command keeps its login in its own temporary `CODEX_HOME`, so Codex on
 
 **Renewing.** Claude Code tokens last about a year. Setup records the date it saves each sign-in and shows a banner a month before a Claude Code token expires. Codex refreshes its own login. If a workspace asks you to sign in to Codex again, repeat the steps. Choose **Renew** or **Replace** in Setup to save a new sign-in, or **Remove** to delete it from Domino.
 
+**When an agent is signed out.** The connector watches the agent output it already relays for the messages Claude Code and Codex print when their sign-in stops working, such as an expired or revoked token. It doesn't make any extra requests. The session’s tab gets a warning dot, and the sessions pane shows **Renew sign-in**, which opens Setup, and **Resume with new sign-in**. Resuming closes that session and reopens its conversation with the sign-in saved in Setup. A session is checked while it’s open in the App, so a sign-out in a session you aren’t viewing shows when you open it. Codex reports a broken sign-in as it starts. Claude Code reports it on your next message.
+
 **How sign-in reaches workspaces.**
 
 - Workspaces receive user environment variables when they start.

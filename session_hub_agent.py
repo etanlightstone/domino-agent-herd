@@ -62,6 +62,18 @@ AGENT_BIN = Path.home() / ".cache/domino-herdr/agent-bin"
 # Sign-in the App provides at launch. Claude Code tokens are kept per run, so a later run
 # starts from the token Domino gives it rather than one saved during an earlier run.
 CREDENTIALS = Path.home() / ".cache/domino-herdr/credentials"
+# Agent panes whose output showed that the agent needs to sign in again, by pane ID.
+SIGN_IN_NEEDED = {}
+TERMINAL_ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-9A-Za-z]|[=>78DEHM])")
+# Messages the CLIs print when their sign-in stops working, as letters and digits only. Terminal UIs
+# redraw only changed cells, so spaces between words can be missing from the output.
+SIGN_IN_FAILURES = {
+    "claude": ("oauthtokenhasexpired", "oauthaccesstokenhasexpired", "oauthtokenhasbeenrevoked",
+               "oauthaccesstokenhasbeenrevoked", "oauthaccesstokenisinvalid", "oauthrefreshtokenisnolongervalid",
+               "loginexpiredpleaserunlogin", "sessionexpiredpleaserunlogin"),
+    "codex": ("accesstokencouldnotberefreshed", "authenticationsessioncouldnotberefreshed",
+              "pleaselogoutandsigninagain", "codexaccounthasnorefreshtoken"),
+}
 os.environ["PATH"] = str(Path.home() / ".local/bin") + ":" + os.environ["PATH"]
 
 
@@ -319,6 +331,8 @@ def running_agents():
     panes = herdr("pane", "list")["panes"]
     labels = {tab["tab_id"]: tab["label"] for tab in herdr("tab", "list")["tabs"]}
     running = []
+    for gone in set(SIGN_IN_NEEDED) - {pane["pane_id"] for pane in panes}:
+        SIGN_IN_NEEDED.pop(gone, None)
     for pane in panes:
         title = labels.get(pane["tab_id"], "")
         name, _, hint = title.partition(" · ")
@@ -349,7 +363,8 @@ def running_agents():
             status = agent.get("agent_status") or pane.get("agent_status")
             running.append({"pane": pane_id, "label": title, "kind": kind, "session": session,
                             "prefix": hint if re.fullmatch(r"[a-f0-9]{8}", hint) else None,
-                            "status": "Starting" if launching and status == "unknown" else status})
+                            "status": "Starting" if launching and status == "unknown" else status,
+                            "signIn": SIGN_IN_NEEDED.get(pane_id) == kind})
     return running
 
 
@@ -426,12 +441,56 @@ def launch(kind, conversation, credential=None):
     return {"pane": pane, "label": title}
 
 
-def read_terminal(channel, child):
+class SignInWatch:
+    """Looks for a sign-in failure in output this connector already relays, until it finds one."""
+
+    def __init__(self, pane, kind):
+        self.pane = pane
+        self.kind = kind
+        self.tail = ""
+
+    def feed(self, frame):
+        if self.kind not in SIGN_IN_FAILURES or self.pane in SIGN_IN_NEEDED:
+            return
+        try:
+            text = base64.b64decode(frame).decode("utf-8", "replace")
+        except ValueError:
+            return
+        # Keep a short tail so a message split across frames still matches.
+        text = self.tail + re.sub(r"[^a-z0-9]", "", TERMINAL_ESCAPES.sub("", text).lower())
+        if any(phrase in text for phrase in SIGN_IN_FAILURES[self.kind]):
+            SIGN_IN_NEEDED[self.pane] = self.kind
+        self.tail = text[-80:]
+
+
+def relaunch(pane, credentials):
+    """Close an agent session and resume its conversation with the sign-in the App has now."""
+    entry = next((row for row in running_agents() if row["pane"] == pane), None)
+    tab = next((row["tab_id"] for row in herdr("pane", "list")["panes"] if row["pane_id"] == pane), None)
+    if not entry or not tab:
+        raise RuntimeError("That agent session has closed.")
+    herdr("tab", "close", tab)
+    SIGN_IN_NEEDED.pop(pane, None)
+    for _ in range(25):
+        if not any(row["pane"] == pane for row in running_agents()):
+            break
+        time.sleep(.2)
+    conversation = entry["session"]
+    # A conversation that failed before its first reply may not be saved. Start a new one then.
+    saved = conversation and any(row["kind"] == entry["kind"] and row["id"] == conversation
+                                 for row in session_history(refresh=True))
+    credential = credentials.get(entry["kind"]) if isinstance(credentials, dict) else None
+    return launch(entry["kind"], conversation if saved else None, credential)
+
+
+def read_terminal(channel, child, watch=None):
     try:
         for line in child.stdout:
             record = json.loads(line)
             if record.get("type") == "terminal.frame" and isinstance(record.get("bytes"), str):
                 frame = record["bytes"]
+                if watch:
+                    watch.feed(frame)
                 for offset in range(0, len(frame), 60_000):
                     EVENTS.put({"channel": channel, "bytes": frame[offset:offset + 60_000]})
     except (OSError, ValueError):
@@ -446,15 +505,16 @@ def read_terminal(channel, child):
 def attach(pane, channel):
     current = next((row for row in herdr("pane", "list")["panes"] if row["pane_id"] == pane), None)
     tabs = herdr("tab", "list")["tabs"]
-    if not current or not any(tab["tab_id"] == current["tab_id"] and
-                              tab["label"].startswith(("Codex · ", "Claude Code · ")) for tab in tabs):
+    label = next((tab["label"] for tab in tabs if current and tab["tab_id"] == current["tab_id"]), "")
+    if not label.startswith(("Codex · ", "Claude Code · ")):
         raise RuntimeError("That agent pane has closed.")
+    watch = SignInWatch(pane, "codex" if label.startswith("Codex · ") else "claude")
     child = subprocess.Popen([*HERDR, "terminal", "session", "control", pane,
                               "--takeover", "--cols", "100", "--rows", "30"],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL, text=True, bufsize=1)
     TERMINALS[channel] = child
-    Thread(target=read_terminal, args=(channel, child), daemon=True).start()
+    Thread(target=read_terminal, args=(channel, child, watch), daemon=True).start()
 
 
 IMAGE_TYPES = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"), (b"GIF8", "gif"))
@@ -710,6 +770,8 @@ def handle_agent_action(operation, command):
         if operation == "attach":
             attach(command["pane"], command["channel"])
             return True
+        if operation == "relaunch":
+            return relaunch(command["pane"], command.get("credentials"))
         raise RuntimeError("Unknown connector action.")
 
 

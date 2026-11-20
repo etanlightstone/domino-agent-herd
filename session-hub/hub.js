@@ -520,6 +520,7 @@ async function saveCredential(provider, value) {
     delete credentialUI.drafts[provider.key];
     const outdated = outdatedWorkspaces();
     credentialFeedback(`${provider.name} sign-in saved to Domino. New ${provider.name} sessions you open here use it, including in running workspaces.` +
+      (signInFlagged(provider.key) ? ' Choose Resume with new sign-in on the session that asked you to sign in.' : '') +
       (outdated.length ? ` Restart ${outdated.map(workspaceLabel).join(', ')} first. ${outdated.length === 1 ? 'It runs' : 'They run'} an older connector. Open ${outdated.length === 1 ? 'it' : 'each one'} and choose Restart workspace.` : ''));
   } catch (error) {
     credentialFeedback(error.message, true);
@@ -798,6 +799,7 @@ function showAgents(workspace, preferred) {
   byId('agent-empty').hidden = true;
   byId('agent-restart').hidden = true;
   byId('connector-update').hidden = true;
+  byId('signin-alert').hidden = true;
   agentNotice('Loading agent sessions…');
   if (transfer) {
     restoreNormalTerminal(transfer);
@@ -966,17 +968,42 @@ function renderAgentTabs() {
     tab.dataset.key = item.pane;
     const caption = title.startsWith(kind + ' · ') ? title.slice(kind.length + 3) : title;
     tab.append(element('span', kind, 'agent-kind'), element('span', caption, 'agent-tab-title'));
-    if (item.status) {
+    if (item.status || item.signIn) {
       const dot = element('span', '', 'agent-dot');
-      dot.dataset.state = item.status.toLowerCase();
+      dot.dataset.state = item.signIn ? 'blocked' : item.status.toLowerCase();
       tab.append(dot);
     }
-    tab.title = [title, item.status].filter(Boolean).join(' · ');
+    tab.title = [title, item.signIn ? 'Needs you to sign in again' : item.status].filter(Boolean).join(' · ');
     tab.setAttribute('role', 'tab');
     tab.setAttribute('aria-controls', 'agent-view');
     tab.setAttribute('aria-selected', String(visibleView === 'agent' && selectedPane === item.pane));
     return tab;
   }));
+  renderSignInAlert();
+}
+
+// Sessions whose agent printed a sign-in failure. The connector reports them with the running agents.
+const dismissedSignIn = new Set();
+
+function renderSignInAlert() {
+  const bar = byId('signin-alert');
+  const flagged = agentWorkspace && !splitActive ? runningAgents.filter(item => item.signIn &&
+    !dismissedSignIn.has(workspaceKey(agentWorkspace) + item.pane)) : [];
+  const item = flagged.find(agent => agent.pane === selectedPane) || flagged[0];
+  bar.hidden = !item;
+  if (!item) return;
+  const kind = agentKind(item);
+  const title = item.title || item.label || kind;
+  const caption = title.startsWith(kind + ' · ') ? title.slice(kind.length + 3) : title;
+  const message = `${kind} in session ${caption} needs you to sign in again. Renew your sign-in in Setup, then resume the session here. Its conversation carries over.`;
+  if (byId('signin-alert-text').textContent !== message) byId('signin-alert-text').textContent = message;
+  bar.dataset.pane = item.pane;
+  bar.dataset.kind = item.kind;
+  bar.dataset.label = title;
+}
+
+function signInFlagged(kind) {
+  return runningAgents.some(item => item.signIn && item.kind === kind);
 }
 
 function selectAgent(item) {
@@ -1116,7 +1143,8 @@ function retryableTerminalError(error) {
 
 async function connectAgent(slot, workspace, payload, label, recovering = false) {
   const status = recovering ? 'Reconnecting…' :
-    payload.pane ? 'Attaching…' : payload.conversation ? 'Resuming conversation…' : 'Starting agent…';
+    payload.pane ? 'Attaching…' : payload.relaunch ? 'Resuming with your new sign-in…'
+      : payload.conversation ? 'Resuming conversation…' : 'Starting agent…';
   const request = {slot, workspace, pane: payload.pane, label, status};
   slot.request = request;
   slotNotice(slot, status);
@@ -1901,6 +1929,17 @@ byId('browse-projects').addEventListener('click', browseProjects);
 byId('empty-browse').addEventListener('click', browseProjects);
 byId('agent-restart-button').addEventListener('click', () => confirmConnectorRestart(agentWorkspace));
 byId('connector-update-button').addEventListener('click', () => confirmConnectorRestart(agentWorkspace));
+byId('signin-alert-renew').addEventListener('click', () =>
+  openSetup({signIn: true, provider: byId('signin-alert').dataset.kind}));
+byId('signin-alert-resume').addEventListener('click', () => {
+  const {pane, label} = byId('signin-alert').dataset;
+  byId('signin-alert').hidden = true;
+  launchAgent({relaunch: pane}, label);
+});
+byId('signin-alert-dismiss').addEventListener('click', () => {
+  dismissedSignIn.add(workspaceKey(agentWorkspace) + byId('signin-alert').dataset.pane);
+  renderSignInAlert();
+});
 for (const id of ['workspace-tabs', 'agent-running']) {
   byId(id).addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;

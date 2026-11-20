@@ -1013,6 +1013,17 @@ def workspace_agents(pid, wid):
 @app.post("/api/projects/<pid>/workspaces/<wid>/agents")
 def launch_agent(pid, wid):
     data = body()
+    pane = data.get("relaunch")
+    if pane is not None:
+        # Resume an agent session that lost its sign-in, using the sign-in saved in Setup now.
+        if not isinstance(pane, str) or not 0 < len(pane) <= 128:
+            abort(400, "Select a running agent session.")
+        run = running_workspace(pid, wid)
+        current = {kind: launch_credential(kind) for kind in credentials.PROVIDERS}
+        session = broker.call(run, "relaunch", pane=pane, timeout=45,
+                              credentials={kind: value for kind, value in current.items() if value is not None})
+        return jsonify(channel=broker.connect_terminal(run, session["pane"]), label=session["label"],
+                       pane=session["pane"])
     kind = data.get("kind")
     conversation = data.get("conversation")
     if kind not in ("codex", "claude") or (conversation is not None and
