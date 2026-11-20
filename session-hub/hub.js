@@ -931,16 +931,37 @@ function workspaceGitView(workspace) {
   return view;
 }
 
-function renderGitControl(control, feedback, {status, result}) {
+function renderGitControl(control, feedback, {status, result, resultAt}) {
   const {state, detail} = status;
   control.dataset.state = state;
   control.setAttribute('aria-disabled', String(state === 'disabled' || state === 'busy'));
   control.title = `Sync Git · ${detail}`;
   control.setAttribute('aria-label', `Sync Git. ${detail}`);
   const message = result ? (result.synced ? 'Git is up to date.' : result.detail) : '';
-  feedback.textContent = message;
-  feedback.hidden = !message;
-  feedback.classList.toggle('error', result?.state === 'error');
+  const error = result?.state === 'error';
+  // Show a sync result briefly. A failure stays longer so there's time to read it.
+  const remaining = (error ? 20000 : 10000) - (Date.now() - (resultAt || 0));
+  showGitToast(control, feedback, message, error, remaining);
+}
+
+function showGitToast(control, toast, message, error, remaining) {
+  clearTimeout(toast.hideTimer);
+  if (!toast.dismiss) {
+    toast.dismiss = () => { toast.hidden = true; };
+    toast.addEventListener('click', toast.dismiss);
+  }
+  if (!message || remaining <= 0 || control.hidden || !control.isConnected || !control.offsetParent) {
+    toast.hidden = true;
+    return;
+  }
+  if (toast.textContent !== message) toast.textContent = message;
+  toast.classList.toggle('error', error);
+  toast.title = 'Dismiss';
+  toast.hidden = false;
+  const box = control.getBoundingClientRect();
+  toast.style.top = `${Math.round(box.bottom + 6)}px`;
+  toast.style.left = `${Math.round(Math.max(8, Math.min(box.left, innerWidth - toast.offsetWidth - 8)))}px`;
+  toast.hideTimer = setTimeout(toast.dismiss, remaining);
 }
 
 function renderTileGit(slot, view) {
@@ -997,6 +1018,7 @@ async function syncGit(view) {
   const status = await requestGit(view, true);
   view.syncing = false;
   view.status = view.result = status;
+  view.resultAt = Date.now();
   renderGit(view);
   if (status.state === 'busy') setTimeout(refreshGit, 1500);
 }
@@ -1334,24 +1356,51 @@ function openTerminal(slot, workspace, pane, channel, label, recovering) {
     queue.push({...action});
     flush();
   }
+  // A failed send shows briefly and clears on the next successful one.
+  let sendError;
+  function showSendError(error) {
+    const transient = retryableTerminalError(error);
+    slotNotice(session.slot, transient
+      ? `Couldn’t reach the workspace for a moment${error.status ? ` (HTTP ${error.status})` : ''}. Try again.`
+      : error.message, true);
+    clearTimeout(sendError);
+    sendError = setTimeout(clearSendError, 10000);
+  }
+  function clearSendError() {
+    if (sendError === undefined) return;
+    clearTimeout(sendError);
+    sendError = undefined;
+    if (active() && !session.slot.request) slotNotice(session.slot, '');
+  }
   async function flush() {
     if (flushing) return;
     flushing = true;
     try {
       while (queue.length && active()) {
-        const {text, ...action} = queue.shift();
+        const {text, retried, ...action} = queue.shift();
         try {
           if (action.type !== 'terminal.input') {
             await api('terminals/' + channel, action);
+            clearSendError();
             continue;
           }
           for (let pos = 0; pos < text.length && active(); pos += 8000) {
             await api('terminals/' + channel, {type: action.type, bytes: encodeInput(text.slice(pos, pos + 8000))});
           }
+          clearSendError();
         } catch (error) {
           if (!active()) return;
-          if (error.status === 404) terminalDisconnected(session, error, true);
-          else slotNotice(session.slot, error.message, true);
+          if (error.status === 404) {
+            terminalDisconnected(session, error, true);
+            continue;
+          }
+          // Resizes and scrolls are safe to repeat. Keystrokes and images aren't: the first try may have arrived.
+          if (['terminal.resize', 'terminal.scroll'].includes(action.type) && !retried && retryableTerminalError(error)) {
+            queue.unshift({...action, retried: true});
+            await new Promise(resolve => setTimeout(resolve, 700));
+            continue;
+          }
+          showSendError(error);
         }
       }
     } finally {
@@ -1546,7 +1595,7 @@ function makeTile(side) {
   slot.actions = actions;
   slot.sync = iconButton('Sync Git', () => syncGit(slot.gitView), element('span', '↻'), 'git-sync');
   slot.sync.hidden = true;
-  slot.gitFeedback = element('p', '', 'tile-status');
+  slot.gitFeedback = element('p', '', 'git-toast');
   slot.gitFeedback.setAttribute('role', 'status');
   slot.gitFeedback.hidden = true;
   const maximize = element('span', '', 'maximize-icon');

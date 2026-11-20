@@ -105,7 +105,11 @@ button:disabled { opacity: .5; cursor: default; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 #agent-controls { flex-shrink: 0; }
 #status { color: var(--accent-text); margin: 5px 0; font-size: .87rem; }
-#agent-summary, #git-feedback { margin: 0; padding: 5px 12px; background: var(--hover); font-size: .83rem; }
+#agent-summary { margin: 0; padding: 5px 12px; background: var(--hover); font-size: .83rem; }
+/* Git results float below their Sync button and fade, so they don't take space from the terminal. */
+.git-toast { position: fixed; z-index: 20; max-width: min(360px, calc(100vw - 16px)); margin: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--success); box-shadow: 0 4px 14px #0002; font-size: .82rem; line-height: 1.4; cursor: pointer; animation: git-toast-in .15s ease-out; }
+.git-toast.error { color: var(--error); }
+@keyframes git-toast-in { from { opacity: 0; transform: translateY(-3px); } }
 #status[data-error=true], .error { color: var(--error) !important; }
 .agents { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .empty { text-align: center; }
