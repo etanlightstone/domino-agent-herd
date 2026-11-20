@@ -320,7 +320,7 @@ const SIGN_IN_GUIDES = {
       linux: {install: claudeInstallUnix},
       windows: {install: 'irm https://claude.ai/install.ps1 | iex'},
     },
-    paste: 'Paste the token',
+    paste: 'Paste the Claude token printed in your terminal after logging in',
     placeholder: 'sk-ant-oat01-…',
     lifetime: 'Claude Code tokens last about a year. This App reminds you a month before it expires.',
     manualLifetime: 'Claude Code tokens last about a year.',
@@ -332,13 +332,14 @@ const SIGN_IN_GUIDES = {
       mac: {
         command: [...unixCodexLogin,
           `  printf '%s' "$encoded" | tr -d '\\r\\n' | pbcopy && printf 'Copied.\\n'`, ')'].join('\n'),
-        result: 'When the terminal says Copied, paste the sign-in below.',
+        result: 'When Terminal says Copied, the text is on your clipboard.',
         existing: codexExistingUnix + ' | pbcopy',
       },
       linux: {
         command: [...unixCodexLogin,
           `  printf '%s' "$encoded" | tr -d '\\r\\n'`, `  printf '\\n'`, ')'].join('\n'),
-        result: 'Copy the full base64 line printed in the terminal and paste it below.',
+        result: 'Copy the entire base64 line printed after you sign in.',
+        paste: 'Paste the code printed in your terminal after logging in',
         existing: codexExistingUnix + `; printf '\\n'`,
       },
       windows: {
@@ -359,13 +360,13 @@ const SIGN_IN_GUIDES = {
     Remove-Item -LiteralPath $tempHome -Recurse -Force
   }
 }`,
-        result: 'When PowerShell says Copied, paste the sign-in below.',
+        result: 'When PowerShell says Copied, the text is on your clipboard.',
         existing: `$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 $authPath = Join-Path $codexHome 'auth.json'
 Set-Clipboard -Value ([Convert]::ToBase64String([IO.File]::ReadAllBytes($authPath)))`,
       },
     },
-    paste: 'Paste the sign-in',
+    paste: 'Paste the code copied to your clipboard after logging in',
     placeholder: 'ewogICJhdXRoX21vZGUi…',
     lifetime: 'Codex keeps this sign-in fresh. If a workspace asks you to sign in to Codex again, repeat these steps.',
   },
@@ -514,9 +515,11 @@ function signInGuide(provider) {
   platform.value = credentialUI.platforms[provider.key] || defaultSignInPlatform;
   platformLabel.append(platform);
   const instructions = element('div');
+  const pasteLabel = element('span');
   function showPlatform() {
     const {shell} = SIGN_IN_PLATFORMS[platform.value];
-    const {command, result, install, existing} = guide.platforms[platform.value];
+    const {command, result, install, existing, paste} = guide.platforms[platform.value];
+    pasteLabel.textContent = paste || guide.paste;
     const intro = element('p', `Open ${shell} and run this command.`);
     const installHelp = element('details', '', 'guide-options');
     installHelp.append(element('summary', `Install ${provider.name}`));
@@ -541,7 +544,7 @@ function signInGuide(provider) {
 
   if (credentials.writable) {
     const form = element('form', '', 'guide-paste');
-    const field = element('label', `${guide.paste} here`);
+    const field = element('label');
     const input = element('textarea', '', 'secret');
     input.name = 'value';
     input.rows = 3;
@@ -551,7 +554,7 @@ function signInGuide(provider) {
     input.placeholder = guide.placeholder;
     input.value = credentialUI.drafts[provider.key] || '';
     input.addEventListener('input', () => { credentialUI.drafts[provider.key] = input.value; });
-    field.append(input);
+    field.append(pasteLabel, input);
     const save = element('button', credentialUI.busy === provider.key ? 'Saving…' : `Save ${provider.name} sign-in`, 'primary');
     save.type = 'submit';
     save.disabled = Boolean(credentialUI.busy);
@@ -573,7 +576,7 @@ function signInGuide(provider) {
   } else {
     const where = element('p');
     where.append('Open ', link('your Domino account settings', credentials.accountUrl),
-      ' and find User environment variables. Set this name, paste the value, then choose Set variable.');
+      ' and find User environment variables. Set this name, paste the text from step 1, then choose Set variable.');
     steps.append(guideStep(2, where, commandBlock(provider.variable, 'variable name'),
       element('p', 'This Domino deployment doesn’t let the App save the sign-in for you. ' +
         (guide.manualLifetime || guide.lifetime), 'meta')));
