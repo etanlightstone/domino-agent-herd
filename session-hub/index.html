@@ -21,7 +21,8 @@
   <div class="workspace-tab-bar">
     <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Workspaces and split view"></div>
     <nav class="app-actions" aria-label="Domino Agent Herd">
-      <button id="browse-projects" type="button" class="primary" aria-haspopup="dialog">Browse projects</button>
+      <span id="app-update" role="status" hidden>Updates detected, re-deploy agent herd on latest commit</span>
+      <button id="browse-projects" type="button" class="primary" aria-haspopup="dialog">Start new Workspace</button>
       <button id="connector-settings" type="button" aria-haspopup="dialog">Setup</button>
       <a class="icon-button help-link" href="https://github.com/etanlightstone/domino-agent-herd#readme" target="_blank" rel="noopener noreferrer" title="Help: setup and usage guide (opens the README in a new tab)" aria-label="Help (opens the README in a new tab)">?</a>
       <button id="theme" class="icon-button" type="button" aria-label="Switch to light mode" title="Switch to light mode">
@@ -33,7 +34,7 @@
       <span class="block-drop-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
     </button>
   </div>
-  <p id="status" role="status">Loading workspaces…</p>
+  <p id="status" class="is-loading" role="status">Loading workspaces…</p>
   <div id="app-settings-banner" class="setup-banner" role="alert" hidden>
     <span id="app-settings-banner-status"></span>
     <button id="app-settings-banner-dismiss" type="button" hidden>Not now</button>
@@ -53,7 +54,7 @@
     <div>
       <h1 id="empty-workspaces-title">No running workspaces</h1>
       <p>Find a recent project to resume a workspace or start a new one.</p>
-      <button id="empty-browse" type="button" class="primary" aria-haspopup="dialog">Browse projects</button>
+      <button id="empty-browse" type="button" class="primary" aria-haspopup="dialog">Start new Workspace</button>
     </div>
   </section>
   <section id="agent-panel" class="agents" aria-labelledby="agent-title" hidden>
@@ -97,7 +98,16 @@
           <button id="agent-restart-button" type="button" class="primary" aria-haspopup="dialog">Restart workspace</button>
         </div>
       </section>
-      <div id="agent-empty" class="empty compact" hidden></div>
+      <div id="agent-empty" hidden>
+        <div id="agent-empty-guide" class="agent-empty-guide">
+          <svg class="agent-empty-arrow" viewBox="0 0 108 55" aria-hidden="true" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 52c39 0 69-9 84-39m-16 4 18-7 1 18" stroke-width="2.5"/>
+            <path d="M28 29v-8m-4 4h8M52 15V5m-5 5h10" stroke-width="1.5"/>
+          </svg>
+          <p>Start an agent or resume a conversation from History.</p>
+        </div>
+        <p id="agent-empty-attach" hidden>Choose an agent tab to attach.</p>
+      </div>
       <div id="terminal-panel" hidden>
         <div class="terminal-bar"><button id="terminal-detach">Detach</button></div>
         <div id="terminal"></div>

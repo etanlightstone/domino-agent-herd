@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,6 +22,24 @@ from session_hub_ssh import Bootstrapper, GatewayError, bootstrap_script, run_ov
 app = Flask(__name__, static_folder="session-hub", static_url_path="/assets")
 app.config["MAX_CONTENT_LENGTH"] = 850_000
 actions = Lock()
+
+
+def deployed_revision():
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "--verify", "HEAD"], cwd=Path(__file__).resolve().parent,
+            stderr=subprocess.DEVNULL, text=True, timeout=3,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return revision if re.fullmatch(r"[a-f0-9]{40}", revision) else None
+
+
+APP_REVISION = deployed_revision()
+APP_UPDATE_INTERVAL = 24 * 60 * 60
+app_update_lock = Lock()
+app_update = {"available": False, "next_check": 0}
+
 
 def connector_version(*paths):
     """Fingerprint of the connector files. session_hub_agent.py computes the same value for itself."""
@@ -588,6 +607,30 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.get("/api/app-update")
+def check_app_update():
+    if not APP_REVISION:
+        return jsonify(available=False, recheckIn=APP_UPDATE_INTERVAL)
+    with app_update_lock:
+        if time.monotonic() >= app_update["next_check"]:
+            try:
+                response = requests.get(
+                    f"https://api.github.com/repos/etanlightstone/domino-agent-herd/compare/{APP_REVISION}...main",
+                    params={"per_page": 1}, headers={"Accept": "application/vnd.github+json"},
+                    timeout=(3, 5),
+                )
+                response.raise_for_status()
+                ahead = response.json().get("ahead_by")
+                if isinstance(ahead, int):
+                    app_update["available"] = ahead > 0
+            except (requests.RequestException, ValueError, AttributeError):
+                # Keep the last confirmed result if GitHub is temporarily unavailable.
+                pass
+            app_update["next_check"] = time.monotonic() + APP_UPDATE_INTERVAL
+        return jsonify(available=app_update["available"],
+                       recheckIn=max(1, int(app_update["next_check"] - time.monotonic())))
+
+
 @app.get("/api/inventory")
 def get_inventory():
     visible = projects()
@@ -604,7 +647,7 @@ def get_inventory():
     return jsonify(
         projects=[project_summary(item) for item in visible], workspaces=workspaces,
         dominoUrl=domino_url, hubProject=project_id, user=owner, managedAvailable=setup["state"] == "ready", setup=setup,
-        credentials=credential_summary(),
+        credentials=credential_summary(), appRevision=APP_REVISION,
     )
 
 

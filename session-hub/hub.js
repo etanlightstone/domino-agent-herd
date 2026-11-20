@@ -71,10 +71,12 @@ function workspaceIDEPath(workspace) {
   return `./workspaces/${workspace.projectId}/${workspace.id}/ide`;
 }
 
-function notice(message, error = false) {
-  byId('status').textContent = message;
-  byId('status').dataset.error = error;
-  byId('status').hidden = !message;
+function notice(message, error = false, loading = false) {
+  const status = byId('status');
+  status.textContent = message;
+  status.dataset.error = error;
+  status.classList.toggle('is-loading', loading);
+  status.hidden = !message;
 }
 
 async function api(path, body, signal) {
@@ -95,6 +97,7 @@ async function refresh() {
   data.projects = orderProjects(data.projects, data.workspaces);
   if (!data.projects.some(project => project.id === selected)) selected = data.projects[0]?.id;
   render();
+  checkAppUpdate(data.appRevision);
 }
 
 function render() {
@@ -333,6 +336,37 @@ function storageSet(key, value, area = 'localStorage') {
   try { window[area].setItem(key, value); } catch { /* Preferences just aren't remembered. */ }
 }
 
+const appUpdateKey = `workspace-sessions-update:${location.pathname}`;
+let appUpdate = {};
+
+async function checkAppUpdate(revision) {
+  const notice = byId('app-update');
+  if (!revision) {
+    notice.hidden = true;
+    return;
+  }
+  if (appUpdate.revision !== revision) {
+    let cached;
+    try { cached = JSON.parse(storageGet(appUpdateKey)); } catch { /* Ignore old cache entries. */ }
+    appUpdate = cached?.revision === revision ? cached : {revision};
+  }
+  const check = appUpdate;
+  notice.hidden = !check.available;
+  if (check.pending || Date.now() < check.nextCheck) return;
+  check.pending = true;
+  try {
+    const result = await api('app-update', undefined, AbortSignal.timeout(12000));
+    if (data?.appRevision !== revision || appUpdate !== check) return;
+    appUpdate = {revision, available: result.available, nextCheck: Date.now() + result.recheckIn * 1000};
+    storageSet(appUpdateKey, JSON.stringify(appUpdate));
+    notice.hidden = !result.available;
+  } catch {
+    check.nextCheck = Date.now() + 60 * 60 * 1000;
+  } finally {
+    check.pending = false;
+  }
+}
+
 function formatCredentialDate(value) {
   const [year, month, day] = String(value || '').split('-').map(Number);
   return year ? credentialDate.format(new Date(year, month - 1, day)) : '';
@@ -383,6 +417,7 @@ function credentialAttention() {
 }
 
 function renderCredentialsBanner() {
+  updateAgentSignIn();
   const attention = credentialAttention();
   byId('credentials-banner').hidden = !attention;
   if (!attention) return;
@@ -611,8 +646,12 @@ function needsFirstRunSetup() {
     !storageGet('workspace-sessions-setup-seen');
 }
 
+function workspaceStarting(workspace) {
+  return !workspace.running && (pending.has(workspace.id) || workspace.state === 'Starting');
+}
+
 function renderWorkspaceTabs() {
-  const running = data?.workspaces.filter(workspace => (workspace.running || pending.has(workspace.id)) &&
+  const running = data?.workspaces.filter(workspace => (workspace.running || workspaceStarting(workspace)) &&
     !changing.has(workspace.id)) || [];
   const tabs = running.map(workspace => {
     const repeated = running.filter(item => item.projectId === workspace.projectId).length > 1;
@@ -624,7 +663,7 @@ function renderWorkspaceTabs() {
     tab.setAttribute('aria-controls', 'agent-panel');
     tab.setAttribute('aria-selected', String(!splitActive && workspace.id === agentWorkspace?.id));
     tab.disabled = !workspace.running;
-    if (tab.disabled) tab.textContent += ' · Starting';
+    if (tab.disabled) tab.append(' · ', element('span', 'Starting', 'is-loading'));
     const state = workspaceAgentState(workspace);
     if (state) {
       const dot = element('span', '', 'agent-dot');
@@ -743,11 +782,13 @@ function row(workspace) {
   const container = element('article', '', 'row');
   const label = element('div');
   const transition = changing.get(workspace.id);
-  const state = transition || (pending.has(workspace.id) ? 'Starting' : workspace.running ? 'Running' : workspace.state);
+  const starting = !transition && workspaceStarting(workspace);
+  const state = transition || (starting ? 'Starting' : workspace.running ? 'Running' : workspace.state);
   const meta = element('div', '', 'meta');
   const badge = element('span', state, 'status-tag');
   badge.dataset.running = workspace.running;
-  badge.dataset.starting = Boolean(transition) || pending.has(workspace.id);
+  badge.dataset.starting = Boolean(transition) || starting;
+  badge.classList.toggle('is-loading', starting);
   meta.append(badge);
   const problem = workspace.running && !workspace.connector.connected && bootstrapProblems[workspace.bootstrap?.state];
   if (workspace.running && workspace.connector.ready) {
@@ -755,18 +796,16 @@ function row(workspace) {
   } else if (problem) {
     meta.append(document.createTextNode(`  ·  ${problem}`));
   } else if (workspace.running && (workspace.managed || workspace.connector.connected)) {
-    meta.append(document.createTextNode('  ·  Connector starting'));
+    meta.append('  ·  ', element('span', 'Connector starting', 'is-loading'));
   }
   label.append(element('strong', workspace.project === data.projects.find(project => project.id === selected)?.name &&
     !workspace.running ? workspace.name : workspace.project), meta);
   if (workspace.running || workspace.projectId !== selected) label.append(element('div', workspace.name, 'meta'));
   const controls = element('div', '', 'actions');
   if (workspace.running && !transition) {
-    const ideLink = workspace.tool === 'vscode'
-      ? workspaceIDELink(workspace, 'Open VS Code', workspaceIDEPath(workspace), 'button')
-      : link('Open workspace', workspace.ide, 'button');
-    controls.append(ideLink,
-      button('Open sessions', () => {
+    if (workspace.tool !== 'vscode') controls.append(link('Open workspace', workspace.ide, 'button'));
+    controls.append(
+      button('Start coding!', () => {
         projectsDialog.close();
         showAgents(workspace);
       }, 'primary'),
@@ -794,10 +833,12 @@ let visibleView = 'agent';
 let gitView;
 const gitViews = new Map();
 
-function agentNotice(message, error = false) {
-  byId('agent-summary').textContent = message;
-  byId('agent-summary').hidden = !message;
-  byId('agent-summary').classList.toggle('error', error);
+function agentNotice(message, error = false, loading = false) {
+  const summary = byId('agent-summary');
+  if (summary.textContent !== message) summary.textContent = message;
+  summary.hidden = !message;
+  summary.classList.toggle('error', error);
+  summary.classList.toggle('is-loading', loading);
 }
 
 function agentPath(workspace = agentWorkspace) {
@@ -857,7 +898,7 @@ function showAgents(workspace, preferred) {
   byId('agent-restart').hidden = true;
   byId('connector-update').hidden = true;
   byId('signin-alert').hidden = true;
-  agentNotice('Loading agent sessions…');
+  agentNotice('Loading agent sessions…', false, true);
   if (transfer) {
     restoreNormalTerminal(transfer);
     focusTerminal(normalSlot.terminal);
@@ -1091,6 +1132,31 @@ function selectAgent(item) {
   launchAgent({pane: item.pane}, item.title || item.label);
 }
 
+function newAgentButton(kind, name) {
+  const control = button(`New ${name}`, () => {
+    if (control.getAttribute('aria-disabled') !== 'true') launchAgent({kind});
+  }, 'primary');
+  control.id = `new-${kind}`;
+  const tooltip = element('span', `Open Setup to sign in to ${name}.`, 'agent-sign-in-tooltip');
+  tooltip.id = `${control.id}-tooltip`;
+  tooltip.setAttribute('role', 'tooltip');
+  const wrapper = element('span', '', 'agent-launch');
+  wrapper.append(control, tooltip);
+  return wrapper;
+}
+
+function updateAgentSignIn() {
+  for (const kind of ['codex', 'claude']) {
+    const control = byId(`new-${kind}`);
+    if (!control) continue;
+    const state = data?.credentials?.providers?.[kind]?.state;
+    const unavailable = ['missing', 'invalid', 'expired'].includes(state);
+    control.setAttribute('aria-disabled', String(unavailable));
+    if (unavailable) control.setAttribute('aria-describedby', `${control.id}-tooltip`);
+    else control.removeAttribute('aria-describedby');
+  }
+}
+
 async function loadAgents(workspace) {
   if (!workspace || agentWorkspace !== workspace) return;
   clearTimeout(panelRefresh);
@@ -1110,31 +1176,33 @@ async function loadAgents(workspace) {
       runningAgents = [];
       renderAgentTabs();
       if (!normalSlot.request && !restarting.has(workspace.id)) {
-        agentNotice(canRestart ? '' : list.detail || (workspace.managed
+        const bootstrap = list.bootstrap?.state;
+        const loading = list.connected ? !list.detail || list.detail.startsWith('Preparing Herdr')
+          : ['waiting', 'started', 'failed'].includes(bootstrap) ||
+            (bootstrap === 'running' && list.detail === 'Starting the workspace connector.') ||
+            (!bootstrap && workspace.managed);
+        agentNotice(canRestart ? '' : list.detail || (loading
           ? 'Waiting for the workspace connector to start…'
-          : 'Agent sessions are unavailable for this workspace’s environment.'));
+          : 'Agent sessions are unavailable for this workspace’s environment.'), false, loading);
       }
       return;
     }
     byId('agent-restart').hidden = true;
     if (byId('agent-controls').dataset.workspace !== workspaceKey(workspace) ||
         !byId('agent-controls').querySelector('#new-codex')) {
-      const codex = button('New Codex', () => launchAgent({kind: 'codex'}), 'primary');
-      codex.id = 'new-codex';
-      const claude = button('New Claude Code', () => launchAgent({kind: 'claude'}), 'primary');
-      claude.id = 'new-claude';
       byId('agent-controls').dataset.workspace = workspaceKey(workspace);
-      byId('agent-controls').replaceChildren(codex, claude, button('History', openHistory));
+      byId('agent-controls').replaceChildren(newAgentButton('codex', 'Codex'),
+        newAgentButton('claude', 'Claude Code'), button('History', openHistory));
+      updateAgentSignIn();
     }
     if (!normalSlot.request && !byId('agent-summary').classList.contains('error')) agentNotice(list.detail || '');
     runningAgents = list.running;
     renderAgentTabs();
     refreshSplitTitles(workspace, runningAgents);
     renderWorkspaceTabs();
-    const empty = byId('agent-empty');
-    empty.hidden = Boolean(normalSlot.terminal || normalSlot.request);
-    empty.textContent = runningAgents.length ? 'Choose an agent tab to attach.' :
-      'Start an agent or resume a conversation from History.';
+    byId('agent-empty').hidden = Boolean(normalSlot.terminal || normalSlot.request);
+    byId('agent-empty-guide').hidden = Boolean(runningAgents.length);
+    byId('agent-empty-attach').hidden = !runningAgents.length;
     if (autoAttach && !splitActive && runningAgents.length && !normalSlot.terminal &&
         !normalSlot.request && visibleView === 'agent') {
       autoAttach = false;
@@ -1900,7 +1968,7 @@ async function restartWithConnector(workspace) {
   try {
     await api(path + '/stop-for-connector', {confirmed: true});
     notice('Stopping the workspace so Domino can enable agent sessions.');
-    if (agentWorkspace === workspace) agentNotice('Waiting for Domino to stop the workspace…');
+    if (agentWorkspace === workspace) agentNotice('Waiting for Domino to stop the workspace…', false, true);
     for (let attempt = 0; attempt < 45; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2500));
       await refresh();
@@ -2001,7 +2069,7 @@ async function runAction(path, body, showInDialog = false) {
     return;
   }
   pending.add(id);
-  notice('Domino is starting the workspace. The hub will refresh until it is ready.');
+  notice('Domino is starting the workspace. The hub will refresh until it is ready.', false, true);
   render();
   watch(id);
 }
