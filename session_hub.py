@@ -818,11 +818,15 @@ def launch_agent(pid, wid):
 
 @app.post("/api/projects/<pid>/workspaces/<wid>/agents/attach")
 def open_agent(pid, wid):
-    pane = body().get("pane")
+    data = body()
+    pane = data.get("pane")
     # Herdr pane IDs are opaque. The connector checks that the ID belongs to a live agent tab.
     if not isinstance(pane, str) or not 0 < len(pane) <= 128:
         abort(400, "Select a running agent pane.")
-    return jsonify(channel=broker.connect_terminal(running_workspace(pid, wid), pane))
+    run = running_workspace(pid, wid)
+    if data.get("run") is not None and data["run"] != run:
+        return jsonify(error="The workspace restarted. Refresh the page to open its current sessions."), 412
+    return jsonify(channel=broker.connect_terminal(run, pane))
 
 
 @app.get("/api/terminals/<channel>")

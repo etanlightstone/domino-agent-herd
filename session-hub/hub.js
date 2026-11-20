@@ -83,7 +83,10 @@ async function api(path, body, signal) {
   };
   const response = await fetch('./api/' + path, options);
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || `Request failed (HTTP ${response.status}).`);
+  if (!response.ok) {
+    throw Object.assign(new Error(result.error || `Request failed (HTTP ${response.status}).`),
+      {status: response.status});
+  }
   return result;
 }
 
@@ -627,7 +630,7 @@ async function loadAgents(workspace) {
       }
       runningAgents = [];
       renderAgentTabs();
-      agentNotice(list.detail || (workspace.managed
+      if (!normalSlot.request) agentNotice(list.detail || (workspace.managed
         ? 'Waiting for the workspace connector to start…'
         : workspace.canEnable && data.managedAvailable
           ? 'Restart this workspace to enable agent sessions here.'
@@ -658,7 +661,9 @@ async function loadAgents(workspace) {
       selectAgent(runningAgents.find(item => item.pane === previous) || runningAgents[0]);
     }
   } catch (error) {
-    if (agentWorkspace === workspace && load === loadNumber) agentNotice(error.message, true);
+    if (agentWorkspace === workspace && load === loadNumber && !normalSlot.request) {
+      agentNotice(error.message, true);
+    }
   } finally {
     if (agentWorkspace === workspace && load === loadNumber) {
       panelRefresh = setTimeout(() => { if (!document.hidden) loadAgents(workspace); }, 4500);
@@ -729,8 +734,14 @@ async function launchAgent(payload, label) {
 
 const paneRequests = new Map();
 
-async function connectAgent(slot, workspace, payload, label) {
-  const status = payload.pane ? 'Attaching…' : payload.conversation ? 'Resuming conversation…' : 'Starting agent…';
+function retryableTerminalError(error) {
+  return error instanceof TypeError || error.name === 'TimeoutError' ||
+    error.status === 429 || error.status >= 500;
+}
+
+async function connectAgent(slot, workspace, payload, label, recovering = false) {
+  const status = recovering ? 'Reconnecting…' :
+    payload.pane ? 'Attaching…' : payload.conversation ? 'Resuming conversation…' : 'Starting agent…';
   const request = {slot, workspace, pane: payload.pane, label, status};
   slot.request = request;
   slotNotice(slot, status);
@@ -738,7 +749,20 @@ async function connectAgent(slot, workspace, payload, label) {
   const current = () => request.slot.request === request;
   const key = payload.pane && JSON.stringify([workspaceKey(workspace), payload.pane]);
   const previous = paneRequests.get(key);
-  const open = () => current() && api(agentPath(workspace) + (payload.pane ? '/attach' : ''), payload);
+  const open = async () => {
+    const path = agentPath(workspace) + (payload.pane ? '/attach' : '');
+    const body = recovering ? {...payload, run: workspace.run} : payload;
+    const delays = recovering ? [1000, 2000, 4000, 8000, 8000, 8000] : [];
+    for (let attempt = 0; current(); attempt++) {
+      try {
+        return await api(path, body, recovering ? AbortSignal.timeout(80000) : undefined);
+      } catch (error) {
+        // The workspace connector can take a few seconds to register again.
+        if (attempt >= delays.length || !(error.status === 409 || retryableTerminalError(error))) throw error;
+        await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+      }
+    }
+  };
   // Avoid a stale attach taking control back from a newer request for the same pane.
   const opening = previous ? previous.catch(() => {}).then(open) : open();
   if (key) paneRequests.set(key, opening);
@@ -757,7 +781,7 @@ async function connectAgent(slot, workspace, payload, label) {
     const pane = opened.pane || payload.pane;
     if (pane) sessionStorage.setItem('agent:' + workspaceKey(workspace), pane);
     detachTerminal(host);
-    openTerminal(host, workspace, pane, channel, opened.label || label);
+    openTerminal(host, workspace, pane, channel, opened.label || label, recovering);
     if (host === normalSlot) selectedPane = pane;
     slotNotice(host, '');
     if (shouldFocus) focusTerminal(host.terminal);
@@ -822,13 +846,14 @@ function terminalTheme() {
     : {background: '#ffffff', foreground: '#2e2e38', cursor: '#543fde', selectionBackground: '#e4ddff'};
 }
 
-function openTerminal(slot, workspace, pane, channel, label) {
+function openTerminal(slot, workspace, pane, channel, label, recovering) {
   const mount = element('div', '', 'terminal-surface');
   const view = new Terminal({
     cursorBlink: true, fontSize: 13, convertEol: false, scrollback: 3000, theme: terminalTheme()
   });
   const fit = new FitAddon.FitAddon();
-  const session = {slot, workspace, pane, channel, label, mount, view, fit, sequence: 0, poll: new AbortController()};
+  const session = {slot, workspace, pane, channel, label, mount, view, fit, sequence: 0,
+    failures: 0, recoveredAt: recovering ? Date.now() : 0};
   const active = () => session.slot.terminal === session;
   // One request in flight at a time keeps ordering, but while it is out, queued keystrokes/scrolls are
   // merged so a slow round trip doesn't build a backlog (which made typing lag and scrolling overshoot).
@@ -864,7 +889,9 @@ function openTerminal(slot, workspace, pane, channel, label) {
             await api('terminals/' + channel, {type: action.type, bytes: encodeInput(text.slice(pos, pos + 8000))});
           }
         } catch (error) {
-          if (active()) slotNotice(session.slot, error.message, true);
+          if (!active()) return;
+          if (error.status === 404) terminalDisconnected(session, error, true);
+          else slotNotice(session.slot, error.message, true);
         }
       }
     } finally {
@@ -945,49 +972,63 @@ function openTerminal(slot, workspace, pane, channel, label) {
 }
 
 async function pumpTerminal(session) {
-  if (session.slot.terminal !== session) return;
+  if (session.slot.terminal !== session || session.poll) return;
+  const poll = new AbortController();
+  session.poll = poll;
+  session.pollStarted = Date.now();
+  // The server holds a healthy long poll for at most 12 seconds.
+  const timeout = setTimeout(() => poll.abort(new DOMException('Terminal poll timed out.', 'TimeoutError')), 20000);
+  const current = () => session.slot.terminal === session && session.poll === poll;
+  let retryDelay;
   try {
     const result = await api(
-      'terminals/' + session.channel + '?wait=12&after=' + session.sequence, undefined, session.poll.signal
+      'terminals/' + session.channel + '?wait=12&after=' + session.sequence, undefined, poll.signal
     );
-    if (session.slot.terminal !== session) return;
+    if (!current()) return;
     for (const frame of result.frames) {
       session.view.write(decodeFrame(frame.bytes));
       session.sequence = frame.seq;
     }
     session.failures = 0;
-    if (!result.closed) {
-      pumpTerminal(session);
-      return;
-    }
-    terminalDisconnected(session);
+    if (result.closed) terminalDisconnected(session);
+    else retryDelay = 0;
   } catch (error) {
-    if (session.slot.terminal !== session) return;
-    // A suspended/idle tab drops the long-poll with a bare network TypeError; back off and retry the channel.
-    if (error instanceof TypeError && (session.failures = (session.failures || 0) + 1) <= 4) {
-      setTimeout(() => pumpTerminal(session), 1000 * session.failures);
-      return;
+    if (!current()) return;
+    const retryable = retryableTerminalError(error);
+    if (retryable && ++session.failures <= 4) retryDelay = 1000 * session.failures;
+    else terminalDisconnected(session, error, retryable || error.status === 404);
+  } finally {
+    clearTimeout(timeout);
+    if (current()) {
+      session.poll = undefined;
+      if (retryDelay) session.pollRetry = setTimeout(() => pumpTerminal(session), retryDelay);
+      else if (retryDelay === 0) pumpTerminal(session);
     }
-    terminalDisconnected(session, error);
   }
 }
 
-function terminalDisconnected(session, error) {
+function restartTerminalPoll(session) {
+  clearTimeout(session.pollRetry);
+  const previous = session.poll;
+  session.poll = undefined;
+  previous?.abort();
+  pumpTerminal(session);
+}
+
+function terminalDisconnected(session, error, reattach = false) {
   const {slot, workspace, pane, label} = session;
   const hadFocus = session.mount.contains(document.activeElement);
+  const recover = reattach && pane && !slot.request && Date.now() - session.recoveredAt > 30000;
   detachTerminal(slot);
   if (slot === normalSlot) {
-    selectedPane = undefined;
+    selectedPane = recover ? pane : undefined;
     renderAgentTabs();
   } else if (hadFocus) {
     slot.add.focus({preventScroll: true});
   }
   if (slot.request) return;
-  // An expired channel can be reattached to the same pane, at most once per slot every 30s.
-  if (error && pane && Date.now() - (slot.lastRecovery || 0) > 30000) {
-    slot.lastRecovery = Date.now();
-    if (slot === normalSlot) launchAgent({pane}, label);
-    else connectAgent(slot, workspace, {pane}, label);
+  if (recover) {
+    connectAgent(slot, workspace, {pane}, label, true);
     return;
   }
   const message = slot === normalSlot ? 'Select the agent to attach again.' : 'Choose a running session to continue.';
@@ -1002,7 +1043,8 @@ function detachTerminal(slot) {
   const session = slot.terminal;
   if (!session) return;
   slot.terminal = undefined;
-  session.poll.abort();
+  clearTimeout(session.pollRetry);
+  session.poll?.abort();
   session.cleanup?.();
   session.view.dispose();
   session.mount.remove();
@@ -1149,7 +1191,6 @@ function leaveSplit(transfer) {
     if (slot.request !== transfer) slot.request = undefined;
     if (slot.terminal !== transfer) detachTerminal(slot);
     slotNotice(slot, '');
-    slot.lastRecovery = undefined;
     renderTerminalSlot(slot);
   }
 }
@@ -1453,8 +1494,23 @@ themeControl.addEventListener('click', () => {
   setTheme(theme);
 });
 
+function resumeTerminalPolling() {
+  if (document.hidden) return;
+  const now = Date.now();
+  for (const {terminal} of [normalSlot, ...splitTiles]) {
+    if (!terminal || now - (terminal.lastPollRestart || 0) < 12000) continue;
+    if (terminal.poll && now - terminal.pollStarted < 12000) continue;
+    terminal.lastPollRestart = now;
+    restartTerminalPoll(terminal);
+  }
+}
+
+window.addEventListener('focus', resumeTerminalPolling);
+window.addEventListener('online', resumeTerminalPolling);
+window.addEventListener('pageshow', resumeTerminalPolling);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
+  resumeTerminalPolling();
   if (agentWorkspace) loadAgents(agentWorkspace);
   refreshGit();
   pollOtherWorkspaces();
