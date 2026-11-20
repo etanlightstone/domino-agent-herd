@@ -8,7 +8,6 @@ const setupAppUrl = location.origin + location.pathname;
 let setupDetails;
 let setupTimer;
 let setupBusy = false;
-let sshPreferenceBusy = false;
 let data;
 let selected;
 const pending = new Set();
@@ -91,7 +90,7 @@ async function api(path, body, signal) {
 }
 
 async function refresh() {
-  data = await api('inventory');
+  data = await api('inventory?' + new URLSearchParams({appUrl: setupAppUrl}));
   selected ??= data.hubProject;
   render();
 }
@@ -129,7 +128,8 @@ function render() {
   renderSetup();
 }
 
-function setupMessage(state, name) {
+function setupMessage(state, name, mode) {
+  if (mode === 'ssh') return 'Agent sessions connect over Domino workspace SSH. No setup is needed.';
   switch (state) {
     case 'ready': return `${name} is ready for agent sessions.`;
     case 'building': return `Domino is building ${name}. This page will update when it’s ready.`;
@@ -141,10 +141,11 @@ function setupMessage(state, name) {
 
 function renderSetup() {
   const setup = data?.setup || {state: 'unconfigured'};
-  const {state, name, id} = setup;
+  const {state, name, id, mode} = setup;
+  const ssh = mode === 'ssh';
   const buildPending = state === 'building';
-  byId('connector-setup-banner').hidden = state === 'ready';
-  byId('connector-setup-status').textContent = setupMessage(state, name);
+  byId('connector-setup-banner').hidden = ssh || state === 'ready';
+  byId('connector-setup-status').textContent = setupMessage(state, name, mode);
   byId('connector-setup-open').textContent = state === 'unconfigured' ? 'Set up agent sessions' : 'View setup';
   clearTimeout(setupTimer);
   if (buildPending) {
@@ -154,7 +155,11 @@ function renderSetup() {
     }), 5000);
   }
   if (!setupDetails || !setupDialog.open) return;
-  byId('setup-feedback').textContent = setupMessage(state, name);
+  byId('setup-feedback').textContent = setupMessage(state, name, mode);
+  byId('setup-sharing-warning').hidden = false;
+  byId('setup-ssh-mode').hidden = !ssh;
+  byId('setup-environment').hidden = ssh;
+  if (ssh) return;
   byId('setup-create').hidden = !['unconfigured', 'unavailable'].includes(state);
   byId('setup-create').disabled = setupBusy || !setupDetails.base;
   byId('setup-create').textContent = setupDetails.base
@@ -180,43 +185,19 @@ async function openSetup() {
     if (setupDialog.open) return;
   }
   setupDetails = null;
-  byId('setup-options').hidden = true;
+  for (const id of ['setup-options', 'setup-ssh-mode', 'setup-environment', 'setup-sharing-warning']) byId(id).hidden = true;
   byId('setup-owner').textContent = '';
   byId('setup-feedback').textContent = 'Finding this Domino App…';
   setupDialog.showModal();
-  updateSshPreference();
   try {
     setupDetails = await api('setup?' + new URLSearchParams({appUrl: setupAppUrl}));
-    const {owner, appUrl, environment} = setupDetails;
+    const {owner, appUrl, environment, mode} = setupDetails;
     byId('setup-owner').textContent = `${owner} · ${appUrl}`;
     byId('setup-options').hidden = false;
-    data.setup = environment;
+    data.setup = mode === 'ssh' ? {mode, state: 'ready'} : {mode, ...environment};
     renderSetup();
   } catch (error) {
     byId('setup-feedback').textContent = error.message;
-  }
-}
-
-async function updateSshPreference(preference) {
-  if (sshPreferenceBusy) return;
-  const checkbox = byId('setup-ssh-enabled');
-  const save = byId('setup-ssh-save');
-  const feedback = byId('setup-ssh-feedback');
-  const saving = preference !== undefined;
-  let loaded = saving;
-  sshPreferenceBusy = true;
-  checkbox.disabled = save.disabled = true;
-  feedback.textContent = saving ? 'Saving SSH preference…' : 'Loading SSH preference…';
-  try {
-    const {enabled} = await api('settings/ssh', preference);
-    checkbox.checked = enabled;
-    loaded = true;
-    feedback.textContent = saving ? 'SSH preference saved.' : '';
-  } catch (error) {
-    feedback.textContent = error.message;
-  } finally {
-    sshPreferenceBusy = false;
-    checkbox.disabled = save.disabled = !loaded;
   }
 }
 
@@ -228,7 +209,7 @@ async function configureConnector(mode, environmentId) {
   let failure;
   try {
     const result = await api('setup', {appUrl: setupAppUrl, mode, environmentId});
-    data.setup = result.environment;
+    data.setup = {mode: 'environment', ...result.environment};
     data.managedAvailable = data.setup.state === 'ready';
     await refresh();
   } catch (error) {
@@ -344,6 +325,13 @@ function renderDetail() {
     [element('p', 'You have no workspaces in this project.')]));
 }
 
+const bootstrapProblems = {
+  'ssh-off': 'Restart to connect agent sessions',
+  'no-sshd': 'No SSH server in this environment',
+  unsupported: 'Agent sessions unavailable',
+  failed: 'Connector retrying',
+};
+
 function row(workspace) {
   const container = element('article', '', 'row');
   const label = element('div');
@@ -354,8 +342,11 @@ function row(workspace) {
   badge.dataset.running = workspace.running;
   badge.dataset.starting = Boolean(transition) || pending.has(workspace.id);
   meta.append(badge);
+  const problem = workspace.running && !workspace.connector.connected && bootstrapProblems[workspace.bootstrap?.state];
   if (workspace.running && workspace.connector.ready) {
     meta.append(document.createTextNode('  ·  Agent sessions ready'));
+  } else if (problem) {
+    meta.append(document.createTextNode(`  ·  ${problem}`));
   } else if (workspace.running && (workspace.managed || workspace.connector.connected)) {
     meta.append(document.createTextNode('  ·  Connector starting'));
   }
@@ -1371,7 +1362,9 @@ async function watchWorkspaceAction(workspace, deleting) {
 function confirmConnectorRestart(workspace) {
   dialogBody.replaceChildren(
     element('h2', `Restart ${workspace.project} with agent sessions?`),
-    element('p', 'This ends running processes. Domino will then resume the workspace and connect it to this App when the connector is available.'),
+    element('p', data.setup?.mode === 'ssh'
+      ? 'This ends running processes. Domino then resumes the workspace in its current environment with SSH on, and this App connects its agent sessions.'
+      : 'This ends running processes. Domino will then resume the workspace and connect it to this App when the connector is available.'),
     button('Restart workspace', () => {
       dialog.close();
       restartWithConnector(workspace);
@@ -1407,7 +1400,7 @@ async function createDialog(project) {
   dialogBody.replaceChildren(element('h2', `Start a workspace · ${project.name}`), element('p', 'Loading available IDEs…'));
   dialog.showModal();
   try {
-    const {tools, connectorTools, sameBase} = await api(`projects/${project.id}/configuration`);
+    const {mode, tools, connectorTools, sameBase} = await api(`projects/${project.id}/configuration`);
     if (!tools.length && !connectorTools.length) throw new Error('There are no workspace IDEs configured.');
     const form = element('form');
     const name = element('input');
@@ -1427,9 +1420,11 @@ async function createDialog(project) {
       if (choices.some(item => item.id === value)) tool.value = value;
       else if (choices.some(item => item.id === 'vscode')) tool.value = 'vscode';
       submit.disabled = !choices.length;
-      description.textContent = managed.checked
-        ? 'Uses the private Workspace Sessions environment and this project’s default hardware tier.'
-        : 'Uses this project’s default compute environment and hardware tier.';
+      description.textContent = mode === 'ssh'
+        ? 'Uses this project’s default compute environment and hardware tier. Agent sessions connect over Domino SSH.'
+        : managed.checked
+          ? 'Uses the private Workspace Sessions environment and this project’s default hardware tier.'
+          : 'Uses this project’s default compute environment and hardware tier.';
     }
     const managed = element('input');
     managed.type = 'checkbox';
@@ -1525,11 +1520,6 @@ for (const id of ['workspace-tabs', 'agent-running']) {
 }
 byId('connector-settings').addEventListener('click', openSetup);
 byId('connector-setup-open').addEventListener('click', openSetup);
-byId('setup-ssh').addEventListener('submit', event => {
-  event.preventDefault();
-  const checkbox = byId('setup-ssh-enabled');
-  if (!checkbox.disabled) updateSshPreference({enabled: checkbox.checked});
-});
 byId('setup-create').addEventListener('click', () => configureConnector('create'));
 byId('setup-link').addEventListener('submit', event => {
   event.preventDefault();

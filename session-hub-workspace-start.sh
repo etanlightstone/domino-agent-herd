@@ -5,7 +5,9 @@ if [[ "${DOMINO_RUN_HOST_PATH:-}" == */notebookSession/* ]] &&
    [[ "${DOMINO_STARTING_USERNAME:-}" == "$SESSION_HUB_OWNER" ]]; then
   workspace_hub_dir="$HOME/.cache/domino-herdr"
   (umask 077; mkdir -p "$workspace_hub_dir")
-  nohup python3 - "$workspace_hub_dir" "$SESSION_HUB_APP_URL" >>"$workspace_hub_dir/connector.log" 2>&1 </dev/null <<'PY' &
+  # The App may also start the connector over SSH. The lock keeps one connector per workspace.
+  nohup flock -n "$workspace_hub_dir/connector.lock" \
+    python3 - "$workspace_hub_dir" "$SESSION_HUB_APP_URL" >>"$workspace_hub_dir/connector.log" 2>&1 </dev/null <<'PY' &
 import os
 import sys
 import time

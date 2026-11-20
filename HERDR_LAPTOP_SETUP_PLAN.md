@@ -14,7 +14,7 @@ Use the original `herdr` terminal client. The separate Herdr graphical app uses 
 4. Show progress for all selected workspaces. Give each row or terminal status line a concrete result such as **Connected**, **Sign in again**, **Start this workspace in Domino**, or **Check the SSH host key**. Once at least one workspace is usable, open Herdr with all successful connections. Give the user one way to retry the rest.
 5. On future visits, a local command and shortcut labeled **Herdr for Domino** restore or reuse the tunnels and open the same Herdr window. Running setup again can add workspaces to the existing selection. Offer an explicit local remove action for workspaces the user no longer wants listed.
 
-The existing **Enable SSH for Herdr on your laptop** setting controls future Workspace Sessions starts and resumes. Offer a link to that setting when needed. Saving the preference applies to later runs and requires a restart before it affects a running SSH-disabled workspace. Keep restart an explicit user action because it ends live agents. The environment setup continues through its own Create and Link controls. [Current setup dialog](session-hub/index.html#L84) · [Workspace start and resume](session_hub.py#L510)
+When Domino allows workspace SSH, Workspace Sessions turns SSH on for every workspace it starts or resumes, because the App itself connects over SSH. A workspace started elsewhere with SSH off needs a restart from the App before laptop SSH can reach it. Keep restart an explicit user action because it ends live agents. Deployments with workspace SSH off use the connector environment instead, and laptop SSH is unavailable there. [Workspace start and resume](session_hub.py)
 
 ## Verify the connection contract first
 
@@ -72,7 +72,7 @@ If people want the same ease as the browser's launch buttons, add a workspace-si
 
 ### 5. Make the published App optional after provisioning
 
-The laptop should use Domino SSH to connect directly to the workspace Herdr server. The existing App still hosts the connector and launcher downloads during workspace startup. Test reopening against running workspaces with the App stopped. Then provide a compute-environment or project bootstrap that installs the required tools and starts or makes available `domino-hub` independently of those downloads. Keep the browser connector optional for users who want both experiences. Validate a fresh workspace start with the published App unavailable before promising full independence across workspace restarts. [Current pre-run hook](session-hub-workspace-start.sh#L20) · [Current server startup](session_hub_agent.py#L84)
+The laptop should use Domino SSH to connect directly to the workspace Herdr server. The App currently starts the connector by sending it over Domino SSH, or through the connector environment's pre-run hook. Test reopening against running workspaces with the App stopped. Then provide a compute-environment or project bootstrap that installs the required tools and starts or makes available `domino-hub` independently of those downloads. Keep the browser connector optional for users who want both experiences. Validate a fresh workspace start with the published App unavailable before promising full independence across workspace restarts. [Current pre-run hook](session-hub-workspace-start.sh#L20) · [Current server startup](session_hub_agent.py#L84)
 
 ## Acceptance and delivery order
 

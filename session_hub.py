@@ -4,21 +4,26 @@ import json
 import os
 import re
 import shlex
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from urllib.parse import quote, urlencode, urlsplit
 
 import requests
 from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 from session_hub_broker import Broker
+from session_hub_ssh import Bootstrapper, GatewayError, bootstrap_script, run_over_gateway
 
 app = Flask(__name__, static_folder="session-hub", static_url_path="/assets")
 app.config["MAX_CONTENT_LENGTH"] = 850_000
 actions = Lock()
 broker = Broker()
 setup_variable = "SESSION_HUB_CONNECTOR_ENVIRONMENT"
-ssh_preference_variable = "SESSION_HUB_WORKSPACE_SSH"
+# "ssh" or "environment" overrides detection of Domino's workspace SSH setting.
+mode_override = os.environ.get("SESSION_HUB_CONNECTION_MODE")
 setup_defaults = {
     "id": os.environ.get("SESSION_HUB_WORKSPACE_ENVIRONMENT_ID"),
     "baseEnvironment": os.environ.get("SESSION_HUB_BASE_ENVIRONMENT_ID"),
@@ -158,23 +163,56 @@ def connector_settings():
     return g.connector_settings
 
 
-def workspace_ssh_preference():
-    values = domino(f"/v4/projects/{project_id}/environmentVariables")
-    value = next((item["value"] for item in values if item["name"] == ssh_preference_variable), None)
-    return {"true": True, "false": False}.get(value)
+platform = {"checked": 0.0, "ssh": None}
 
 
-@app.route("/api/settings/ssh", methods=["GET", "POST"])
-def ssh_settings():
-    if request.method == "GET":
-        return jsonify(enabled=workspace_ssh_preference() is True)
-    enabled = body().get("enabled")
-    if not isinstance(enabled, bool):
-        abort(400, "Choose whether to enable workspace SSH.")
-    with actions:
-        domino(f"/v4/projects/{project_id}/environmentVariables", "POST",
-               json={"name": ssh_preference_variable, "value": json.dumps(enabled)})
-    return jsonify(enabled=enabled)
+def ssh_mode():
+    """Connect workspaces over Domino SSH when the deployment allows workspace SSH."""
+    if mode_override in {"ssh", "environment"}:
+        return mode_override == "ssh"
+    now = time.monotonic()
+    if platform["ssh"] is None or now - platform["checked"] > 300:
+        settings = domino("/v4/auth/principal").get("booleanSettings") or []
+        platform.update(ssh="workspaceSshEnabled" in settings, checked=now)
+    return platform["ssh"]
+
+
+def run_ssh_enabled(workspace):
+    """Whether SSH is on for the workspace's current or most recent execution."""
+    session = workspace.get("mostRecentSession") or {}
+    return ((session.get("config") or {}).get("ssh") or {}).get("enabled") is True
+
+
+def app_base_url(details):
+    url = details["url"]
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        abort(409, "The private App needs an HTTPS URL for workspace connectors.")
+    if parts.query or not parts.path.endswith("/"):
+        return f"https://{parts.netloc}/modelproducts/{details['id']}/"
+    return url
+
+
+app_location = {}
+
+
+def connector_app_url(browser_url=None):
+    """The URL connectors use to reach this App. Prefer Domino's record of the running App."""
+    if "url" in app_location:
+        return app_location["url"]
+    if browser_url:
+        try:
+            app_location["url"] = app_base_url(app_for_setup(browser_url))
+            return app_location["url"]
+        except HTTPException:
+            pass
+    apps = domino("/api/apps/v1/apps", params={"projectId": project_id}).get("items") or []
+    running_here = [item for item in apps if local_run and
+                    ((item.get("currentVersion") or {}).get("currentInstance") or {}).get("id") == local_run]
+    candidates = running_here or (apps if len(apps) == 1 else [])
+    if candidates:
+        app_location["url"] = app_base_url(candidates[0])
+    return app_location.get("url")
 
 
 def environment_status():
@@ -303,7 +341,8 @@ def save_connector_environment(environment, details):
 def get_setup():
     details = app_for_setup(request.args.get("appUrl"))
     base = base_for_setup()
-    return jsonify(owner=owner, appUrl=details["url"], environment=environment_status(),
+    return jsonify(owner=owner, appUrl=details["url"], mode="ssh" if ssh_mode() else "environment",
+                   environment=environment_status(),
                    base={"id": base["id"], "name": base["name"]} if base else None)
 
 
@@ -362,6 +401,16 @@ def connector_compatibility(config):
     return revisions[revision]
 
 
+def environment_managed(environment):
+    return bool(connector_settings().get("id")) and environment.get("id") == connector_settings()["id"]
+
+
+def setup_summary():
+    if ssh_mode():
+        return {"mode": "ssh", "state": "ready"}
+    return {"mode": "environment", **environment_status()}
+
+
 def workspace_summary(workspace, project):
     session = workspace.get("mostRecentSession") or {}
     config = workspace.get("configTemplate") or {}
@@ -371,6 +420,8 @@ def workspace_summary(workspace, project):
     status = session.get("sessionStatusInfo") or {}
     project_info = project_summary(project)
     environment = config.get("environment") or {}
+    ssh = ssh_mode()
+    ssh_run = run_ssh_enabled(workspace)
     ide = None
     if status.get("isRunning") and execution:
         params = urlencode({
@@ -383,8 +434,10 @@ def workspace_summary(workspace, project):
         "name": workspace["name"], "state": workspace["state"],
         "running": bool(ide), "ide": ide, "ssh": ssh_enabled, "run": execution,
         "tool": next(iter((session.get("config") or config).get("tools") or []), None),
-        "managed": bool(connector_settings().get("id")) and environment.get("id") == connector_settings()["id"],
-        "canEnable": connector_compatibility(config),
+        "managed": ssh_run if ssh else environment_managed(environment),
+        "canEnable": bool(status.get("isRunning")) and not ssh_run if ssh else connector_compatibility(config),
+        "sshRun": ssh_run,
+        "bootstrap": bootstrapper.status(execution) if ssh and execution else None,
         "connector": broker.status(execution),
         "dataPlane": data_plane if workspace.get("dataPlaneId") != "000000000000000000000000" else None,
         "local": bool(local_run and execution == local_run),
@@ -406,7 +459,10 @@ def get_inventory():
         for item in inventory()
         if item["ownerName"] == owner and item["projectId"] in by_id and not item["deleted"]
     ]
-    setup = environment_status()
+    setup = setup_summary()
+    if setup["mode"] == "ssh":
+        connector_app_url(request.args.get("appUrl"))
+        supervisor_wake.set()
     return jsonify(
         projects=[project_summary(item) for item in visible], workspaces=workspaces,
         dominoUrl=domino_url, hubProject=project_id, user=owner, managedAvailable=setup["state"] == "ready", setup=setup,
@@ -422,9 +478,12 @@ def configuration(pid):
     if not environment or not tier:
         abort(409, "This project needs a default environment and hardware tier in Domino.")
     tools = available_tools(pid, environment)
+    if ssh_mode():
+        return jsonify(mode="ssh", tools=tools, connectorTools=[], sameBase=False)
     linked = connector_settings()
     connector_tools = available_tools(pid, linked["id"]) if managed_ready() else []
-    return jsonify(tools=tools, connectorTools=connector_tools, sameBase=environment == linked.get("baseEnvironment"))
+    return jsonify(mode="environment", tools=tools, connectorTools=connector_tools,
+                   sameBase=environment == linked.get("baseEnvironment"))
 
 
 def available_tools(pid, environment):
@@ -478,11 +537,12 @@ def workspace_cluster_config(config):
     }
 
 
-def update_workspace_for_resume(pid, workspace, ssh_preference, use_connector):
+def update_workspace_for_resume(pid, workspace, enable_ssh, use_connector):
+    """Keep the workspace's own environment unless switching to the connector environment."""
     config = workspace["configTemplate"]
     current_ssh = config.get("ssh")
-    ssh = current_ssh if ssh_preference is None else {**(current_ssh or {}), "enabled": ssh_preference}
-    if not use_connector and (ssh_preference is None or ssh_preference == (current_ssh or {}).get("enabled", False)):
+    ssh = {**(current_ssh or {}), "enabled": True} if enable_ssh else current_ssh
+    if not use_connector and (not enable_ssh or (current_ssh or {}).get("enabled") is True):
         return
 
     environment = config["environment"]
@@ -516,18 +576,19 @@ def resume(pid, wid):
             return jsonify(id=wid)
         if workspace["state"] != "Stopped":
             abort(409, "Wait for Domino to finish the current workspace operation.")
-        ssh_preference = workspace_ssh_preference()
-        use_connector = (body().get("managed") is not False
+        enable_ssh = ssh_mode()
+        use_connector = (not enable_ssh and body().get("managed") is not False
                          and connector_compatibility(workspace["configTemplate"]) and managed_ready())
         try:
-            update_workspace_for_resume(pid, workspace, ssh_preference, use_connector)
+            update_workspace_for_resume(pid, workspace, enable_ssh, use_connector)
         except DominoError as error:
             if not use_connector or error.status not in {400, 403, 404, 422}:
                 raise
             app.logger.warning("Domino rejected the connector environment update for %s (HTTP %s).",
                                wid, error.status)
-            update_workspace_for_resume(pid, workspace, ssh_preference, use_connector=False)
+            update_workspace_for_resume(pid, workspace, enable_ssh, use_connector=False)
         start_session(pid, workspace)
+    supervisor_wake.set()
     return jsonify(id=wid)
 
 
@@ -563,7 +624,10 @@ def stop_for_connector(pid, wid):
         workspace = domino(workspace_path(pid, wid))
         if workspace["ownerName"] != owner or workspace["deleted"]:
             abort(403, "Only your workspaces can be restarted from the app.")
-        if not connector_compatibility(workspace.get("configTemplate") or {}) or not managed_ready():
+        if ssh_mode():
+            if run_ssh_enabled(workspace) and workspace["state"] != "Stopped":
+                abort(409, "SSH is already on for this workspace run.")
+        elif not connector_compatibility(workspace.get("configTemplate") or {}) or not managed_ready():
             abort(409, "A compatible Workspace Sessions environment is unavailable.")
         if workspace["state"] == "Stopped":
             return jsonify(id=wid)
@@ -592,7 +656,8 @@ def create(pid):
     if not environment or not tier:
         abort(409, "This project needs a default environment and hardware tier in Domino.")
     revision = settings.get("defaultEnvironmentRevisionSpec")
-    if data.get("managed") is True:
+    enable_ssh = ssh_mode()
+    if data.get("managed") is True and not enable_ssh:
         if not managed_ready():
             abort(409, "The Workspace Sessions environment is unavailable.")
         environment = connector_settings()["id"]
@@ -603,7 +668,6 @@ def create(pid):
         if any(item["projectId"] == pid and item["ownerName"] == owner and
                not item["deleted"] and item["name"] == name.strip() for item in inventory()):
             abort(409, "A workspace with this name already exists in the project.")
-        ssh_preference = workspace_ssh_preference()
         workspace = domino(workspace_path(pid), "POST", json={
             "name": name.strip(),
             "environmentId": environment,
@@ -611,11 +675,12 @@ def create(pid):
             "hardwareTierId": {"value": tier},
             "tools": [tool],
             "externalVolumeMounts": [],
-            "ssh": {"enabled": data.get("ssh") is True if ssh_preference is None else ssh_preference},
+            "ssh": {"enabled": enable_ssh},
             "persistence": {"persistHomeDirectory": True, "persistPackages": True},
         })
         if workspace["state"] == "Stopped" and not workspace.get("mostRecentSession"):
             start_session(pid, workspace)
+    supervisor_wake.set()
     return jsonify(id=workspace["id"]), 201
 
 
@@ -800,6 +865,11 @@ def workspace_agents(pid, wid):
     state = broker.status(run)
     if state["ready"]:
         state.update(broker.call(run, "inventory", include_history=request.args.get("live") != "1"))
+    elif not state["connected"] and ssh_mode():
+        supervisor_wake.set()
+        progress = bootstrapper.status(run)
+        if progress:
+            state.update(detail=progress["detail"], bootstrap=progress)
     return jsonify(state)
 
 
@@ -879,3 +949,90 @@ def terminal_input(channel):
         abort(400, "Invalid terminal action.")
     broker.terminal(channel, action=action)
     return jsonify(ok=True)
+
+
+bootstrapper = Bootstrapper()
+bootstrap_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="connector-bootstrap")
+supervisor_wake = Event()
+
+
+def bootstrap_workspace(workspace, run, attempt, app_url, headers):
+    """Start the connector in one workspace over Domino SSH. Runs outside a request."""
+    try:
+        connect = f"{domino_url}/domino-connect/api/v1/workspaces/{workspace['id']}"
+        header = requests.get(connect, headers=headers, timeout=10, allow_redirects=False)
+        header.raise_for_status()
+        session = header.json().get("mostRecentSession") or {}
+        host = (session.get("sshConnectionArgs") or {}).get("host")
+        if session.get("executionId") != run or not host:
+            bootstrapper.update(run, attempt, "waiting", "Waiting for Domino to start the workspace.", 10)
+            return
+        diagnose = requests.get(connect + "/ssh-diagnose", headers=headers, timeout=30, allow_redirects=False)
+        diagnose.raise_for_status()
+        checks = diagnose.json()
+        if any((checks.get(name) or {}).get("result") != "ok"
+               for name in ("isRunning", "isReachable", "isSSHServerListening", "hasValidHostKey")):
+            bootstrapper.record_ssh_unavailable(run, attempt, run_ssh_enabled(workspace))
+            return
+        authority = requests.get(os.environ["DOMINO_API_HOST"] + "/v4/workspace/ssh/host/sign/publicKey",
+                                 headers=headers, timeout=10, allow_redirects=False)
+        authority.raise_for_status()
+        token = headers["Authorization"].split(" ", 1)[1]
+        output = run_over_gateway(host, run, token, authority.json()["publicKey"],
+                                  bootstrap_script(app_url, workspace["projectId"], run))
+        bootstrapper.record_output(run, attempt, output)
+    except GatewayError as error:
+        bootstrapper.record_failure(run, attempt, str(error))
+    except (requests.RequestException, ValueError, KeyError):
+        bootstrapper.record_failure(run, attempt, "Could not reach Domino’s workspace SSH service. Retrying.")
+    except Exception:
+        app.logger.exception("Connector bootstrap failed for %s.", run)
+        bootstrapper.record_failure(run, attempt, "Agent session startup failed unexpectedly. Retrying.")
+
+
+def sweep_workspaces():
+    """Start connectors in running owner workspaces that have not registered with this App."""
+    if not ssh_mode():
+        bootstrapper.forget_except(set())
+        return
+    running = {}
+    for item in inventory():
+        session = item.get("mostRecentSession") or {}
+        run = session.get("executionId")
+        if (item["ownerName"] == owner and not item["deleted"] and run
+                and (session.get("sessionStatusInfo") or {}).get("isRunning")):
+            running[run] = item
+    bootstrapper.forget_except(set(running))
+    pending = [run for run in running if not broker.status(run)["connected"]]
+    for run in set(running) - set(pending):
+        bootstrapper.connected(run)
+    if not pending:
+        return
+    app_url = connector_app_url()
+    if not app_url:
+        return
+    headers = dict(request.environ["domino_headers"])
+    for run in pending:
+        workspace = running[run]
+        environment = (workspace.get("configTemplate") or {}).get("environment") or {}
+        attempt = bootstrapper.claim(run, wait_for_hook=environment_managed(environment))
+        if attempt:
+            bootstrap_pool.submit(bootstrap_workspace, workspace, run, attempt, app_url, headers)
+
+
+def supervise():
+    while True:
+        started = time.monotonic()
+        try:
+            with app.test_request_context("/"):
+                sweep_workspaces()
+        except Exception:
+            app.logger.exception("Workspace connector sweep failed.")
+        supervisor_wake.wait(10)
+        supervisor_wake.clear()
+        # Browser polls wake the sweep. Space sweeps out to limit Domino API calls.
+        time.sleep(max(0.0, 4 - (time.monotonic() - started)))
+
+
+if os.environ.get("SESSION_HUB_SUPERVISOR", "1") != "0":
+    Thread(target=supervise, name="connector-supervisor", daemon=True).start()

@@ -106,34 +106,29 @@
     <h2 id="setup-heading">Connector setup</h2>
     <form method="dialog"><button>Close</button></form>
   </div>
-  <form id="setup-ssh">
-    <label class="check">
-      <input id="setup-ssh-enabled" type="checkbox" aria-describedby="setup-ssh-help" disabled>
-      Enable SSH for Herdr on your laptop
-    </label>
-    <p id="setup-ssh-help" class="meta">Applies the next time you start or resume a workspace from this App. The SSH preference and connector environment are saved separately.</p>
-    <div class="actions">
-      <button id="setup-ssh-save" type="submit" disabled>Save SSH preference</button>
-      <span id="setup-ssh-feedback" role="status"></span>
-    </div>
-  </form>
-  <h3 id="setup-environment-heading">Connector environment</h3>
   <p id="setup-owner" class="meta"></p>
   <p id="setup-feedback" role="status"></p>
-  <div id="setup-options" hidden>
-    <p id="setup-sharing-warning"><strong>Keep this App owner-only.</strong> Anyone with access can manage workspaces and agent sessions using the project owner’s permissions. Review the App’s sharing settings in Domino before continuing.</p>
-    <div class="actions">
-      <button id="setup-create" type="button" class="primary" aria-describedby="setup-sharing-warning">Create private environment</button>
-      <a id="setup-environment-link" target="_blank" rel="noopener" hidden>Open environment in Domino</a>
-    </div>
-    <form id="setup-link">
-      <label>Existing connector environment ID
-        <input name="environmentId" required pattern="[0-9a-f]{24}" spellcheck="false">
-      </label>
-      <p class="meta">Use an environment whose pre-run script points to this App.</p>
-      <div><button type="submit" aria-describedby="setup-sharing-warning">Link environment</button></div>
-    </form>
+  <p id="setup-sharing-warning" hidden><strong>Keep this App owner-only.</strong> Anyone with access can manage workspaces and agent sessions using the project owner’s permissions. Review the App’s sharing settings in Domino.</p>
+  <div id="setup-ssh-mode" hidden>
+    <p>Workspaces you start or resume from this App turn on Domino workspace SSH. The App then connects Codex and Claude Code in each workspace’s own compute environment. Environments need <code>openssh-server</code>, which Domino Standard Environments include.</p>
   </div>
+  <section id="setup-environment" hidden>
+    <h3 id="setup-environment-heading">Connector environment</h3>
+    <p class="meta">Workspace SSH is off in this Domino deployment, so workspaces connect through an environment whose pre-run script starts the connector.</p>
+    <div id="setup-options" hidden>
+      <div class="actions">
+        <button id="setup-create" type="button" class="primary" aria-describedby="setup-sharing-warning">Create private environment</button>
+        <a id="setup-environment-link" target="_blank" rel="noopener" hidden>Open environment in Domino</a>
+      </div>
+      <form id="setup-link">
+        <label>Existing connector environment ID
+          <input name="environmentId" required pattern="[0-9a-f]{24}" spellcheck="false">
+        </label>
+        <p class="meta">Use an environment whose pre-run script points to this App.</p>
+        <div><button type="submit" aria-describedby="setup-sharing-warning">Link environment</button></div>
+      </form>
+    </div>
+  </section>
 </dialog>
 <dialog id="dialog"><div id="dialog-body"></div><form method="dialog"><button>Close</button></form></dialog>
 <dialog id="block-drop" class="block-drop" aria-labelledby="block-drop-title">

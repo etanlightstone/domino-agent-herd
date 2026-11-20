@@ -6,17 +6,32 @@ A Domino App for switching between your workspaces and the Codex and Claude Code
 
 1. Create a Git-based Domino project from this repository under your own Domino account. For a private GitHub repository, configure your GitHub credentials in Domino so it can clone the repo.
 2. Publish an owner-only Domino App from the project using `app.sh` and port `8888`. Select a Linux compute environment with Python 3.11 or later, `venv`, and `pip`. At launch, `app.sh` installs the Python packages in `requirements.txt` into a virtual environment and starts Gunicorn. The environment needs package index access if those versions are absent.
-3. Open the published App directly. The setup dialog shows your Domino username and the published App URL. Choose **Create from …** to build a private connector environment from the App project's default environment, or **Link environment** if you have a connector environment already configured for this App. The App saves the choice in the project and updates the build status until the environment is ready. Use one Workspace Sessions App per Domino project.
+3. Open the published App directly. When your Domino deployment allows workspace SSH, there is nothing to set up. Otherwise the setup dialog walks you through a connector environment, described below. Use one Workspace Sessions App per Domino project.
 
 Keep the App accessible only to its project owner. The App acts with that owner's access to their workspaces.
 
 ## Launch a connected workspace
 
-The connector is a background process that runs **inside each workspace**. It registers with the App, reads locally saved agent history, and relays the workspace's Herdr terminals. Domino runs a compute environment's pre-run script whenever it starts a new execution from that environment. This lets a workspace connect before you open its IDE. [Domino's Run Setup Scripts example](https://github.com/dominodatalab/Domino-Training-Workshop#lab-21---inspect-compute-environment)
+The connector is a background process that runs **inside each workspace**. It registers with the App, reads locally saved agent history, and relays the workspace's Herdr terminals. It installs Herdr as needed and attempts to update the agent CLIs once per workspace execution.
 
-After setup shows **ready**, create a workspace with **Connect Codex and Claude Code to this app** selected. The App starts it with the configured environment. The hook downloads and starts the connector, which installs Herdr as needed and attempts to update the agent CLIs once per workspace execution. Projects where you launch workspaces need a default hardware tier and access to the connector environment.
+### With Domino workspace SSH (default)
 
-The base environment needs Python 3.11 or later with `requests`, Bash, `curl`, and `flock`. The workspace needs network access to your Domino App and to the Codex, Claude Code, and Herdr release hosts. For connector startup failures, see `~/.cache/domino-herdr/connector.log` in the workspace. If your Domino account cannot create environments, someone with environment permissions can prepare one for you to link.
+When Domino's workspace SSH setting is on, the App starts connectors over SSH:
+
+- Workspaces you start or resume from the App turn on SSH and keep their own compute environment and revision.
+- About every 10 seconds, the App looks for running workspaces of yours that have no connector. It logs in through Domino's SSH gateway with its owner identity, copies the connector into `~/.cache/domino-herdr`, and starts it in the background.
+- The App verifies the gateway's host certificate against Domino's SSH host CA before it sends credentials.
+- A workspace started elsewhere with SSH off shows **Restart to connect agent sessions**. Choose **Restart with agent sessions** to stop it and resume it with SSH on.
+
+The workspace environment needs `openssh-server`, which Domino Standard Environments and environments built from them include, plus Python 3 with `requests`, Bash, `flock`, and `setsid`. Each workspace needs network access to your Domino App and to the Codex, Claude Code, and Herdr release hosts. For connector startup failures, see `~/.cache/domino-herdr/connector.log` in the workspace.
+
+Set `SESSION_HUB_SSH_USER` on the App if your environments log in as a user other than `ubuntu`. Set `SESSION_HUB_CONNECTION_MODE=environment` to use a connector environment even when workspace SSH is available.
+
+### With a connector environment (fallback when workspace SSH is off)
+
+Domino runs a compute environment's pre-run script whenever it starts a new execution from that environment, so a connector environment can start the connector without SSH. [Domino's Run Setup Scripts example](https://github.com/dominodatalab/Domino-Training-Workshop#lab-21---inspect-compute-environment)
+
+In the setup dialog, choose **Create from …** to build a private connector environment from the App project's default environment, or **Link environment** if one is already configured for this App. After setup shows **ready**, create a workspace with **Connect Codex and Claude Code to this app** selected. Projects where you launch workspaces need a default hardware tier and access to the connector environment. The base environment needs Python 3.11 or later with `requests`, Bash, `curl`, and `flock`. If your Domino account cannot create environments, someone with environment permissions can prepare one for you to link.
 
 ### Prepare an existing environment for linking
 
@@ -43,7 +58,7 @@ Agent sessions opened by this App use `codex --yolo` and `claude --dangerously-s
 ## Restart or move the App
 
 - **Same App URL.** The App rebuilds its workspace list from Domino. The relay inside the App is in memory. Connectors retry registration, and you may need to reopen browser terminals after the App restarts.
-- **New project, same Domino account and deployment.** The new App can see the same workspaces. Create a connector environment in the new App with the same base environment and revision as the previous one, or point an existing environment's hook at the new URL and link it. Workspaces already using a linked environment connect on their next start.
-- **Resume a stopped workspace.** Choose **Resume workspace**. The App automatically uses its connector environment when it is ready and the workspace uses the same base revision or a compatible previous connector environment. When the switch is unavailable, Domino starts the workspace with its existing settings. Domino keeps the workspace ID and storage.
-- **Connect a running workspace.** Choose **Restart with agent sessions** when offered. This stops running processes and starts the workspace again. Setting up the App alone leaves running workspaces active.
+- **New project, same Domino account and deployment.** The new App can see the same workspaces. With workspace SSH, it connects running SSH-enabled workspaces without setup. With connector environments, create one in the new App with the same base environment and revision as the previous one, or point an existing environment's hook at the new URL and link it. Workspaces already using a linked environment connect on their next start.
+- **Resume a stopped workspace.** Choose **Resume workspace**. With workspace SSH, Domino resumes it in its own environment with SSH on. With connector environments, the App uses its connector environment when it is ready and the workspace uses the same base revision or a compatible previous connector environment. When the switch is unavailable, Domino starts the workspace with its existing settings. Domino keeps the workspace ID and storage.
+- **Connect a running workspace.** Running workspaces with SSH on connect automatically. Otherwise choose **Restart with agent sessions** when offered. This stops running processes and starts the workspace again.
 - **Agent sessions.** Herdr, live agent processes, and saved Codex and Claude Code history reside in each workspace. Restarting a workspace ends its live processes. Saved conversations from a persisted home or configured history directory reappear in **History** when its connector reconnects.
