@@ -16,7 +16,7 @@
   <a class="brand" href="./">Workspace Sessions</a>
   <div class="nav-right">
     <a class="help-link" href="https://github.com/etanlightstone/domino-agent-herd#readme" target="_blank" rel="noopener noreferrer" title="Help: setup and usage guide (opens the README in a new tab)" aria-label="Help (opens the README in a new tab)">?</a>
-    <button id="browse-projects" type="button">Browse projects</button>
+    <button id="browse-projects" type="button" class="primary" aria-haspopup="dialog">Browse projects</button>
     <button id="connector-settings" type="button">Setup</button>
     <button id="refresh" type="button">Refresh</button>
     <button id="theme" type="button" aria-pressed="false">Dark mode</button>
@@ -41,9 +41,12 @@
       <button id="credentials-banner-open" type="button" class="primary">Set up sign-in</button>
     </div>
   </div>
-  <section id="empty-workspaces" class="empty" hidden>
-    <h1>No running workspaces</h1>
-    <button id="empty-browse" type="button" class="primary">Browse projects</button>
+  <section id="empty-workspaces" class="empty-state" aria-labelledby="empty-workspaces-title" hidden>
+    <div>
+      <h1 id="empty-workspaces-title">No running workspaces</h1>
+      <p>Find a recent project to resume a workspace or start a new one.</p>
+      <button id="empty-browse" type="button" class="primary" aria-haspopup="dialog">Browse projects</button>
+    </div>
   </section>
   <section id="agent-panel" class="agents" aria-labelledby="agent-title" hidden>
     <div class="work-bar">
@@ -67,6 +70,13 @@
     <p id="git-feedback" role="status" hidden></p>
     <p id="agent-summary" role="status" hidden></p>
     <div id="agent-view">
+      <section id="agent-restart" class="empty-state" aria-labelledby="agent-restart-title" hidden>
+        <div>
+          <h2 id="agent-restart-title">Restart this workspace to connect sessions</h2>
+          <p id="agent-restart-description"></p>
+          <button id="agent-restart-button" type="button" class="primary" aria-haspopup="dialog">Restart workspace</button>
+        </div>
+      </section>
       <div id="agent-empty" class="empty compact" hidden></div>
       <div id="terminal-panel" hidden>
         <div class="terminal-bar"><button id="terminal-detach">Detach</button></div>

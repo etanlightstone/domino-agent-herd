@@ -25,7 +25,7 @@ When Domino's workspace SSH setting is on, the App starts connectors over SSH:
 - Workspaces you start or resume from the App turn on SSH and keep their own compute environment and revision.
 - About every 10 seconds, the App looks for running workspaces of yours that have no connector. It logs in through Domino's SSH gateway with its owner identity, copies the connector into `~/.cache/domino-herdr`, and starts it in the background.
 - The App verifies the gateway's host certificate against Domino's SSH host CA before it sends credentials.
-- A workspace started elsewhere with SSH off shows **Restart to connect agent sessions**. Choose **Restart with agent sessions** to stop it and resume it with SSH on.
+- If SSH was off when a workspace started, its sessions pane offers **Restart workspace**. Domino stops the workspace and resumes it with SSH on.
 
 The workspace environment needs `openssh-server`, which Domino Standard Environments and environments built from them include, plus Python 3 with `requests`, Bash, `flock`, and `setsid`. Each workspace needs network access to your Domino App and to the Codex, Claude Code, and Herdr release hosts. For connector startup failures, see `~/.cache/domino-herdr/connector.log` in the workspace.
 
@@ -79,5 +79,5 @@ Agent sessions opened by this App use `codex --yolo` and `claude --dangerously-s
 - **Same App URL.** The App rebuilds its workspace list from Domino. The relay inside the App is in memory. Connectors retry registration, and you may need to reopen browser terminals after the App restarts.
 - **New project, same Domino account and deployment.** The new App can see the same workspaces. With workspace SSH, it connects running SSH-enabled workspaces without setup. With connector environments, create one in the new App with the same base environment and revision as the previous one, or point an existing environment's hook at the new URL and link it. Workspaces already using a linked environment connect on their next start.
 - **Resume a stopped workspace.** Choose **Resume workspace**. With workspace SSH, Domino resumes it in its own environment with SSH on. With connector environments, the App uses its connector environment when it is ready and the workspace uses the same base revision or a compatible previous connector environment. When the switch is unavailable, Domino starts the workspace with its existing settings. Domino keeps the workspace ID and storage.
-- **Connect a running workspace.** Running workspaces with SSH on connect automatically. Otherwise choose **Restart with agent sessions** when offered. This stops running processes and starts the workspace again.
+- **Connect a running workspace.** Running workspaces with SSH on connect automatically. If the sessions pane offers **Restart workspace**, use it to stop running processes and start the workspace again.
 - **Agent sessions.** Herdr, live agent processes, and saved Codex and Claude Code history reside in each workspace. Restarting a workspace ends its live processes. Saved conversations from a persisted home or configured history directory reappear in **History** when its connector reconnects.

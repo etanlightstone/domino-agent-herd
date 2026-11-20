@@ -42,8 +42,10 @@ body { margin: 0; background: var(--layout); color: var(--ink); }
 .top { background: #2e2e38; color: #fff; min-height: 44px; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .brand { color: #fff; text-decoration: none; font-weight: 700; letter-spacing: .015em; white-space: nowrap; }
 .nav-right { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: 8px; padding: 5px 0; }
-.nav-right button { color: #fff; background: transparent; border-color: #777586; padding: 3px 9px; font-size: .84rem; }
-.nav-right button:hover { background: #484654; color: #fff; border-color: #aaa6bd; }
+.nav-right button { padding: 3px 9px; font-size: .84rem; }
+.nav-right button:not(.primary) { color: #fff; background: transparent; border-color: #777586; }
+.nav-right button:not(.primary):hover { background: #484654; border-color: #aaa6bd; }
+.nav-right .primary { font-weight: 650; }
 .help-link { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid #777586; border-radius: 50%; color: #fff; font-size: .8rem; font-weight: 650; line-height: 1; text-decoration: none; }
 .help-link:hover { background: #484654; border-color: #aaa6bd; }
 main { margin: auto; max-width: 1700px; padding: 10px 20px 14px; }
@@ -106,9 +108,15 @@ button:disabled { opacity: .5; cursor: default; }
 #agent-summary, #git-feedback { margin: 0; padding: 5px 12px; background: var(--hover); font-size: .83rem; }
 #status[data-error=true], .error { color: var(--error) !important; }
 .agents { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-.empty { text-align: center; padding: 40px 18px; }
-.empty h1 { margin: 0 0 16px; }
+.empty { text-align: center; }
 .empty.compact { padding: 36px 12px; color: var(--muted); }
+.empty-state { display: grid; place-items: center; min-height: min(380px, 55dvh); padding: 24px 16px; text-align: center; }
+.empty-state > div { width: min(100%, 460px); padding: 28px 20px; border: 1px solid var(--border); border-radius: 8px; }
+#empty-workspaces > div { background: var(--surface); }
+#agent-restart > div { background: var(--layout); }
+.empty-state h1, .empty-state h2 { font-size: 1.3rem; }
+.empty-state p { margin: 8px 0 18px; }
+.empty-state .primary { padding: 8px 14px; }
 .terminal-bar { padding: 4px 8px 4px 12px; background: var(--hover); border-bottom: 1px solid var(--border); color: var(--muted); font-size: .82rem; }
 .terminal-bar button { padding: 3px 8px; }
 #terminal-panel > .terminal-bar { justify-content: flex-end; }

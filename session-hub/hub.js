@@ -12,6 +12,7 @@ let data;
 let selected;
 const pending = new Set();
 const changing = new Map();
+const restarting = new Set();
 
 function element(tag, value, className) {
   const node = document.createElement(tag);
@@ -91,7 +92,8 @@ async function api(path, body, signal) {
 
 async function refresh() {
   data = await api('inventory?' + new URLSearchParams({appUrl: setupAppUrl}));
-  selected ??= data.hubProject;
+  data.projects = orderProjects(data.projects, data.workspaces);
+  if (!data.projects.some(project => project.id === selected)) selected = data.projects[0]?.id;
   render();
 }
 
@@ -613,9 +615,23 @@ async function pollOtherWorkspaces() {
 }
 setInterval(() => { if (!document.hidden) pollOtherWorkspaces(); }, 5000);
 
+function orderProjects(projects, workspaces) {
+  const latestStart = new Map();
+  for (const workspace of workspaces) {
+    const value = workspace.lastStarted;
+    const started = typeof value === 'number' ? value : Date.parse(value);
+    if (Number.isFinite(started) && started > (latestStart.get(workspace.projectId) ?? 0)) {
+      latestStart.set(workspace.projectId, started);
+    }
+  }
+  return [...projects].sort((a, b) => (latestStart.get(b.id) ?? 0) - (latestStart.get(a.id) ?? 0) ||
+    a.name.localeCompare(b.name) || a.owner.localeCompare(b.owner));
+}
+
 function browseProjects() {
   if (projectsDialog.open) return;
-  if (agentWorkspace) selected = agentWorkspace.projectId;
+  byId('search').value = '';
+  selected = agentWorkspace?.projectId || data?.projects[0]?.id;
   if (data) {
     renderProjects();
     renderDetail();
@@ -643,7 +659,10 @@ function renderProjects() {
 
 function renderDetail() {
   const project = data.projects.find(item => item.id === selected);
-  if (!project) return;
+  if (!project) {
+    byId('detail').replaceChildren();
+    return;
+  }
   const heading = element('div', '', 'heading');
   const title = element('div');
   title.append(element('h2', project.name), link(project.owner + ' / Domino project', project.url));
@@ -654,7 +673,7 @@ function renderDetail() {
 }
 
 const bootstrapProblems = {
-  'ssh-off': 'Restart to connect agent sessions',
+  'ssh-off': 'Restart required to connect sessions',
   'no-sshd': 'No SSH server in this environment',
   unsupported: 'Agent sessions unavailable',
   failed: 'Connector retrying',
@@ -775,6 +794,7 @@ function showAgents(workspace, preferred) {
   byId('agent-view').hidden = false;
   byId('ide-panel').hidden = true;
   byId('agent-empty').hidden = true;
+  byId('agent-restart').hidden = true;
   agentNotice('Loading agent sessions…');
   if (transfer) {
     restoreNormalTerminal(transfer);
@@ -972,19 +992,20 @@ async function loadAgents(workspace) {
     workspace.connector.connected = list.connected;
     if (!list.ready) {
       byId('agent-controls').replaceChildren();
-      if (!list.connected && workspace.canEnable && data.managedAvailable) {
-        byId('agent-controls').append(button('Restart with agent sessions',
-          () => confirmConnectorRestart(workspace), 'primary'));
-      }
+      const canRestart = !list.connected && workspace.canEnable && data.managedAvailable;
+      byId('agent-empty').hidden = true;
+      byId('agent-restart').hidden = !canRestart || Boolean(normalSlot.terminal || normalSlot.request);
+      if (canRestart) renderConnectorRestart(workspace);
       runningAgents = [];
       renderAgentTabs();
-      if (!normalSlot.request) agentNotice(list.detail || (workspace.managed
-        ? 'Waiting for the workspace connector to start…'
-        : workspace.canEnable && data.managedAvailable
-          ? 'Restart this workspace to enable agent sessions here.'
+      if (!normalSlot.request && !restarting.has(workspace.id)) {
+        agentNotice(canRestart ? '' : list.detail || (workspace.managed
+          ? 'Waiting for the workspace connector to start…'
           : 'Agent sessions are unavailable for this workspace’s environment.'));
+      }
       return;
     }
+    byId('agent-restart').hidden = true;
     if (byId('agent-controls').dataset.workspace !== workspaceKey(workspace) ||
         !byId('agent-controls').querySelector('#new-codex')) {
       const codex = button('New Codex', () => launchAgent({kind: 'codex'}), 'primary');
@@ -1687,9 +1708,23 @@ async function watchWorkspaceAction(workspace, deleting) {
   }
 }
 
+function renderConnectorRestart(workspace) {
+  const busy = restarting.has(workspace.id);
+  const action = byId('agent-restart-button');
+  action.disabled = busy;
+  const label = busy ? 'Restarting workspace…' : 'Restart workspace';
+  if (action.textContent !== label) action.textContent = label;
+  const description = byId('agent-restart-description');
+  const message = data.setup?.mode === 'ssh'
+    ? 'SSH was off when this workspace started. Restart it to turn on SSH and connect agent sessions here.'
+    : 'Restart this workspace to connect Codex and Claude Code here.';
+  if (description.textContent !== message) description.textContent = message;
+}
+
 function confirmConnectorRestart(workspace) {
   dialogBody.replaceChildren(
-    element('h2', `Restart ${workspace.project} with agent sessions?`),
+    element('h2', 'Restart workspace?'),
+    element('strong', workspaceLabel(workspace)),
     element('p', data.setup?.mode === 'ssh'
       ? 'This ends running processes. Domino then resumes the workspace in its current environment with SSH on, and this App connects its agent sessions.'
       : 'This ends running processes. Domino will then resume the workspace and connect it to this App when the connector is available.'),
@@ -1702,12 +1737,14 @@ function confirmConnectorRestart(workspace) {
 }
 
 async function restartWithConnector(workspace) {
+  if (restarting.has(workspace.id)) return;
+  restarting.add(workspace.id);
+  renderConnectorRestart(workspace);
   const path = `projects/${workspace.projectId}/workspaces/${workspace.id}`;
   try {
     await api(path + '/stop-for-connector', {confirmed: true});
     notice('Stopping the workspace so Domino can enable agent sessions.');
-    agentNotice('Waiting for Domino to stop the workspace…');
-    byId('agent-controls').replaceChildren();
+    if (agentWorkspace === workspace) agentNotice('Waiting for Domino to stop the workspace…');
     for (let attempt = 0; attempt < 45; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2500));
       await refresh();
@@ -1721,6 +1758,9 @@ async function restartWithConnector(workspace) {
   } catch (error) {
     notice(error.message, true);
     if (agentWorkspace === workspace) agentNotice(error.message, true);
+  } finally {
+    restarting.delete(workspace.id);
+    if (agentWorkspace?.id === workspace.id) renderConnectorRestart(agentWorkspace);
   }
 }
 
@@ -1834,6 +1874,7 @@ byId('search').addEventListener('input', () => { if (data) renderProjects(); });
 byId('history-search').addEventListener('input', renderHistory);
 byId('browse-projects').addEventListener('click', browseProjects);
 byId('empty-browse').addEventListener('click', browseProjects);
+byId('agent-restart-button').addEventListener('click', () => confirmConnectorRestart(agentWorkspace));
 for (const id of ['workspace-tabs', 'agent-running']) {
   byId(id).addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
