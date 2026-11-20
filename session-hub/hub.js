@@ -394,6 +394,7 @@ let autoAttach = false;
 let historyRows = [];
 let visibleView = 'agent';
 let gitView;
+const gitViews = new Map();
 
 function agentNotice(message, error = false) {
   byId('agent-summary').textContent = message;
@@ -462,10 +463,9 @@ function showAgents(workspace, preferred) {
   }
   renderWorkspaceTabs();
   loadWorkspaceIDE(workspace);
-  gitView = {workspace};
-  gitFeedback('');
-  renderGit({state: 'busy', detail: 'Checking this workspace’s Git status…'});
-  refreshGit();
+  gitView = workspaceGitView(workspace);
+  renderGit(gitView);
+  checkGit(gitView);
   loadAgents(workspace);
 }
 
@@ -520,20 +520,40 @@ async function loadWorkspaceIDE(workspace) {
 
 const gitIcons = {clean: '✓', dirty: '●', error: '×', disabled: '–', busy: '↻'};
 
-function renderGit({state, detail}) {
-  const control = byId('git-sync');
-  control.dataset.state = state;
-  control.setAttribute('aria-disabled', String(state === 'disabled' || state === 'busy'));
-  control.title = detail;
-  control.setAttribute('aria-label', `Sync Git. ${detail}`);
-  byId('git-icon').textContent = gitIcons[state];
+function workspaceGitView(workspace) {
+  const key = workspaceKey(workspace);
+  let view = gitViews.get(key);
+  if (!view) {
+    view = {workspace, status: {state: 'busy', detail: 'Checking this workspace’s Git status…'}};
+    gitViews.set(key, view);
+  }
+  return view;
 }
 
-function gitFeedback(message, error = false) {
-  const feedback = byId('git-feedback');
+function renderGitControl(control, feedback, {status, result}) {
+  const {state, detail} = status;
+  control.dataset.state = state;
+  control.setAttribute('aria-disabled', String(state === 'disabled' || state === 'busy'));
+  control.title = `Sync Git · ${detail}`;
+  control.setAttribute('aria-label', `Sync Git. ${detail}`);
+  const message = result ? (result.synced ? 'Git is up to date.' : result.detail) : '';
   feedback.textContent = message;
   feedback.hidden = !message;
-  feedback.classList.toggle('error', error);
+  feedback.classList.toggle('error', result?.state === 'error');
+}
+
+function renderTileGit(slot, view) {
+  slot.sync.hidden = !view || view.status.state === 'disabled';
+  if (view) renderGitControl(slot.sync, slot.gitFeedback, view);
+  else slot.gitFeedback.hidden = true;
+}
+
+function renderGit(view) {
+  if (view === gitView) {
+    renderGitControl(byId('git-sync'), byId('git-feedback'), view);
+    byId('git-icon').textContent = gitIcons[view.status.state];
+  }
+  for (const slot of splitTiles) if (slot.gitView === view) renderTileGit(slot, view);
 }
 
 async function requestGit(view, sync) {
@@ -550,30 +570,37 @@ async function requestGit(view, sync) {
   }
 }
 
-async function refreshGit() {
-  const view = gitView;
-  if (!view || view.check || view.syncing) return;
+async function checkGit(view) {
+  if (view.check || view.syncing) return;
   view.check = requestGit(view, false);
   const status = await view.check;
   view.check = undefined;
-  if (view === gitView && !view.syncing) renderGit(status);
+  if (!view.syncing) {
+    view.status = status;
+    renderGit(view);
+  }
 }
 
-byId('git-sync').addEventListener('click', async () => {
-  const view = gitView;
-  if (!view || byId('git-sync').getAttribute('aria-disabled') === 'true') return;
+function refreshGit() {
+  const views = splitActive ? splitTiles.map(slot => slot.gitView) : [gitView];
+  return Promise.all([...new Set(views.filter(Boolean))].map(checkGit));
+}
+
+async function syncGit(view) {
+  if (!view || view.syncing || ['disabled', 'busy'].includes(view.status.state)) return;
   view.syncing = true;
-  gitFeedback('');
-  renderGit({state: 'busy', detail: 'Syncing this workspace’s Git branch…'});
+  view.result = undefined;
+  view.status = {state: 'busy', detail: 'Syncing this workspace’s Git branch…'};
+  renderGit(view);
   await view.check;
-  if (view !== gitView) return;
   const status = await requestGit(view, true);
-  if (view !== gitView) return;
   view.syncing = false;
-  renderGit(status);
-  gitFeedback(status.synced ? 'Git is up to date.' : status.detail, status.state === 'error');
+  view.status = view.result = status;
+  renderGit(view);
   if (status.state === 'busy') setTimeout(refreshGit, 1500);
-});
+}
+
+byId('git-sync').addEventListener('click', () => syncGit(gitView));
 setInterval(() => { if (!document.hidden) refreshGit(); }, 30000);
 
 function agentKind(item) {
@@ -1086,6 +1113,12 @@ function makeTile(side) {
   const label = element('div', '', 'tile-label');
   label.append(title, subtitle);
   const actions = element('div', '', 'tile-actions');
+  slot.actions = actions;
+  slot.sync = iconButton('Sync Git', () => syncGit(slot.gitView), element('span', '↻'), 'git-sync');
+  slot.sync.hidden = true;
+  slot.gitFeedback = element('p', '', 'tile-status');
+  slot.gitFeedback.setAttribute('role', 'status');
+  slot.gitFeedback.hidden = true;
   const maximize = element('span', '', 'maximize-icon');
   for (let i = 0; i < 4; i++) maximize.append(element('i'));
   slot.change = iconButton('Change session', () => openSessionPicker(slot), element('span', '⇄'));
@@ -1094,14 +1127,14 @@ function makeTile(side) {
     showAgents(session.workspace, session);
   }, maximize);
   slot.change.setAttribute('aria-haspopup', 'dialog');
-  actions.append(slot.change, slot.full);
+  actions.append(slot.sync, slot.change, slot.full);
   const header = element('div', '', 'terminal-bar tile-heading');
   header.append(label, actions);
   slot.empty = element('div', '', 'tile-empty');
   slot.add = button('Add session', () => openSessionPicker(slot), 'tile-add');
   slot.add.setAttribute('aria-haspopup', 'dialog');
   slot.empty.append(slot.add);
-  tile.append(header, status, slot.empty, mount);
+  tile.append(header, status, slot.gitFeedback, slot.empty, mount);
   tile.addEventListener('pointerenter', event => {
     if (event.pointerType === 'mouse' && !event.buttons && !document.querySelector('dialog[open]')) {
       if (slot.terminal) focusTerminal(slot.terminal);
@@ -1129,6 +1162,21 @@ function renderTerminalSlot(slot) {
   slot.change.hidden = !terminal;
   slot.full.hidden = !terminal;
   slot.empty.hidden = Boolean(terminal);
+  const workspace = splitActive && !request ? terminal?.workspace : undefined;
+  const view = workspace && workspaceGitView(workspace);
+  if (slot.gitView === view) return;
+  slot.gitView = view;
+  slot.ide?.remove();
+  slot.ide = undefined;
+  if (workspace?.tool === 'vscode') {
+    const ide = workspaceIDELink(workspace, '</>', workspaceIDEPath(workspace), 'button tile-ide');
+    ide.title = 'Open VS Code in a new browser tab';
+    ide.setAttribute('aria-label', ide.title);
+    slot.actions.insertBefore(ide, slot.change);
+    slot.ide = ide;
+  }
+  renderTileGit(slot, view);
+  if (view) checkGit(view);
 }
 
 function refreshSplitTitles(workspace, agents) {
