@@ -236,14 +236,13 @@ button.confirm-danger:hover { background: #a40922; color: white; }
 
 .setup-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 #setup-owner { overflow-wrap: anywhere; }
-#setup-environment-heading { margin: 16px 0 0; font-size: .95rem; }
-#setup-sharing-warning { padding: 10px 12px; border-radius: 6px; background: var(--warning-bg); }
+#setup-feedback:empty { display: none; }
+#setup-options { margin-top: 10px; }
+#setup-sharing-warning { color: var(--warning); }
 #setup-link { border-top: 1px solid var(--border); padding-top: 12px; }
-#setup-link p { margin: 0; }
 
 .setup-banner + .setup-banner { margin-top: 8px; }
 .setup-dialog { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); }
-.setup-welcome { margin: 0 0 12px; padding: 10px 12px; border-radius: 6px; color: var(--ink); background: var(--selection); }
 .setup-steps { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 12px; }
 .setup-step { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; scroll-margin-top: 8px; }
 .step-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
@@ -268,28 +267,26 @@ button.confirm-danger:hover { background: #a40922; color: white; }
 .guide-marker { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--accent); color: var(--accent-text); font-size: .76rem; font-weight: 700; }
 .guide-body > p:first-child { margin-top: 1px; color: var(--ink); }
 .guide-body p { margin: 4px 0; }
+.guide-platform { width: min(100%, 175px); margin-bottom: 8px; font-size: .82rem; }
 .command { display: flex; align-items: flex-start; gap: 6px; margin: 6px 0; padding: 8px 8px 8px 10px; border-radius: 6px; background: #1d1c26; }
 .command code { flex: 1; min-width: 0; color: #f4f3fa; font: .8rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .command button { flex: none; padding: 2px 9px; font-size: .78rem; color: #f4f3fa; background: transparent; border-color: #5d5a6e; }
 .command button:hover { color: #fff; border-color: #aaa6bd; }
 .guide-options { margin-top: 4px; }
-.guide-options summary { cursor: pointer; color: var(--accent-text); font-size: .82rem; }
+#setup-dialog summary { cursor: pointer; color: var(--accent-text); font-size: .82rem; }
 .guide-paste { margin-top: 0 !important; gap: 8px !important; }
 .guide-paste label { color: var(--ink); }
 .guide-paste textarea { width: 100%; resize: vertical; min-height: 64px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--ink); font: .8rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
 /* Mask pasted secrets on screen shares. */
 .guide-paste textarea.secret:not(:placeholder-shown) { -webkit-text-security: disc; }
-.setup-footer { display: flex; justify-content: flex-end; margin-top: 14px; }
+.setup-footer { display: flex; align-items: start; gap: 12px; margin-top: 14px; }
+#setup-done { margin-left: auto; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 .connector-update { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 12px; color: var(--warning); background: var(--warning-bg); font-size: .83rem; }
 .connector-update button { padding: 3px 9px; font-size: .82rem; }
 .signin-alert { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 7px 12px; color: var(--ink); background: var(--warning-bg); border-bottom: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border)); font-size: .85rem; }
 .signin-alert button { padding: 3px 9px; font-size: .82rem; }
 .app-settings { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 4px; font-size: .84rem; }
-.app-settings li { padding-left: 22px; position: relative; color: var(--muted); }
-.app-settings li::before { position: absolute; left: 2px; font-weight: 700; }
-.app-settings li[data-state=ok]::before { content: '✓'; color: var(--success); }
-.app-settings li[data-state=problem] { color: var(--ink); }
-.app-settings li[data-state=problem]::before { content: '!'; color: var(--warning); left: 6px; }
-.app-settings li[data-state=unknown]::before { content: '•'; }
+.app-settings li { padding-left: 22px; position: relative; color: var(--ink); }
+.app-settings li::before { content: '!'; position: absolute; left: 6px; color: var(--warning); font-weight: 700; }
 #app-settings-banner { background: var(--warning-bg); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }

@@ -4,13 +4,15 @@ A Domino App for switching between your workspaces and the Codex and Claude Code
 
 ## Quick start
 
+> [!CAUTION]
+> **TURN ON “ALLOW DEEP LINKING” WHEN PUBLISHING THE DOMINO APP.** Otherwise Domino’s header sits above the App and takes screen space from your agent terminals.
+
 1. **Create a Git-based Domino project** from this repository under your own Domino account. For a private GitHub repository, configure your GitHub credentials in Domino first so it can clone the repo.
 2. **Publish a Domino App** from that project:
    - **Entry point:** `app.sh`, port `8888`.
    - **Environment:** a Domino Standard Environment. Other Linux environments work if they have Python 3.11 or later with `venv` and `pip`, plus access to a package index. `app.sh` installs `requirements.txt` at launch.
    - **Access:** only you, the project owner. The App acts with your access to your workspaces.
    - **Identity passthrough: off.** This App acts as its project owner. It doesn't work when Domino passes each viewer’s identity to it.
-   - **Allow deep linking: on.** Otherwise Domino’s header sits above the App and takes screen space from your agent terminals.
 3. **Open the App at its own URL.** **Setup** opens on first use and walks you through the rest: connecting your workspaces, then signing in to Claude Code, Codex, or both. Setup also checks the two App settings above. Reopen it any time with the **Setup** button next to your workspace tabs, for example to renew a sign-in.
 
 Workspaces started from a Domino Standard Environment work as they are. Other workspace environments need `openssh-server`, Python 3 with `requests`, Bash, `flock`, and `setsid`. Use one Domino Agent Herd App per Domino project.
@@ -47,18 +49,18 @@ SESSION_HUB_OWNER='your-domino-username'
 SESSION_HUB_APP_URL='https://apps.example.com/modelproducts/your-app-id/'
 ```
 
-Use the exact App URL shown in **Setup**. Build the revision, then enter the environment ID under **Link environment** in **Setup**. The hook uses the workspace's Domino sidecar to download the connector and launcher directly from the App.
+Use the exact App URL shown under **Setup → App details**. Build the revision, then enter the environment ID under **Link environment** in **Setup**. The hook uses the workspace's Domino sidecar to download the connector and launcher directly from the App.
 
 ### Agent sign-in
 
-**Setup → Agent sign-in** saves your Codex and Claude Code sign-in as Domino **user** environment variables, so they reach workspaces in every project you start them in. Set up one agent or both. Each one shows a command to run in Terminal on your Mac and a field to paste its result into. Both use your Claude or ChatGPT subscription, not API keys, and neither signs you out on your Mac.
+**Setup → Agent sign-in** saves your Codex and Claude Code sign-in as Domino **user** environment variables, so they reach workspaces in every project you start them in. Set up either agent or both. Choose macOS, Linux, or Windows to see the commands for your system. Sign in with your Claude or ChatGPT subscription.
 
-| Agent | Run on your Mac | Paste into Setup | Saved as |
+| Agent | Run locally | Paste into Setup | Saved as |
 | --- | --- | --- | --- |
 | Claude Code | `claude setup-token`, then sign in in the browser | The token it prints, starting with `sk-ant-oat01-` | `CLAUDE_CODE_OAUTH_TOKEN` |
-| Codex | The command shown in Setup. It signs in to a separate Codex login for Domino and copies it to the clipboard. | The clipboard contents (⌘V) | `CODEX_AUTH_JSON_B64` |
+| Codex | The command shown in Setup. It creates a separate Codex sign-in for Domino. | The clipboard contents on macOS or Windows, or the base64 line printed on Linux | `CODEX_AUTH_JSON_B64` |
 
-The Codex command keeps its login in its own temporary `CODEX_HOME`, so Codex on your Mac stays signed in. **Other options** in Setup shows how to copy an existing Codex login instead.
+The Codex command uses a temporary `CODEX_HOME`, so your regular Codex sign-in stays active. **Use an existing file-based Codex sign-in** in Setup shows how to copy that sign-in.
 
 **Renewing.** Claude Code tokens last about a year. Setup records the date it saves each sign-in and shows a banner a month before a Claude Code token expires. Codex refreshes its own login. If a workspace asks you to sign in to Codex again, repeat the steps. Choose **Renew** or **Replace** in Setup to save a new sign-in, or **Remove** to delete it from Domino.
 

@@ -142,8 +142,8 @@ const inHeaderFrame = (() => {
   try { return window.self !== window.top; } catch { return true; }
 })();
 const APP_SETTING_TEXT = {
-  passthrough: 'Identity passthrough is on. Turn it off in this App’s settings in Domino, then republish. This App acts as its project owner and doesn’t work when Domino passes each viewer’s identity to it.',
-  deepLinking: 'Deep linking is off, so Domino’s header takes up screen space above this App. Turn on Allow deep linking in this App’s settings in Domino, then open the App again.',
+  passthrough: 'Turn off identity passthrough in Domino’s App settings, then republish so the App can run as its owner.',
+  deepLinking: 'Turn on Allow deep linking in Domino’s App settings, then reopen the App to remove Domino’s header.',
 };
 
 function appSettingStates() {
@@ -166,16 +166,9 @@ function renderAppSettings() {
   if (urgent) byId('app-settings-banner-status').textContent = APP_SETTING_TEXT[urgent];
   byId('app-settings-banner-dismiss').hidden = urgent !== 'deepLinking';
   const list = byId('setup-app-settings');
-  list.hidden = !setupDialog.open || (!appSettings && !inHeaderFrame);
-  if (list.hidden) return;
-  const item = (problem, good, unknown, key) => {
-    const row = element('li', problem ? APP_SETTING_TEXT[key] : problem === false ? good : unknown);
-    row.dataset.state = problem ? 'problem' : problem === false ? 'ok' : 'unknown';
-    return row;
-  };
-  list.replaceChildren(
-    item(states.passthrough, 'Identity passthrough is off.', 'Keep identity passthrough off in this App’s settings in Domino.', 'passthrough'),
-    item(states.deepLinking, 'Deep linking is on, so the App opens without Domino’s header.', 'Turn on Allow deep linking in this App’s settings so the App opens without Domino’s header.', 'deepLinking'));
+  const problems = Object.keys(states).filter(key => states[key]);
+  list.hidden = !setupDialog.open || !problems.length;
+  list.replaceChildren(...problems.map(key => element('li', APP_SETTING_TEXT[key])));
 }
 
 async function loadAppSettings() {
@@ -187,14 +180,12 @@ async function loadAppSettings() {
   renderAppSettings();
 }
 
-function setupMessage(state, name, mode) {
-  if (mode === 'ssh') return 'Agent sessions connect over Domino workspace SSH. No setup is needed.';
+function setupMessage(state, name) {
   switch (state) {
-    case 'ready': return `${name} is ready for agent sessions.`;
-    case 'building': return `Domino is building ${name}. This page will update when it’s ready.`;
+    case 'building': return `Domino is building ${name}.`;
     case 'failed': return `The build for ${name} failed. Open the environment in Domino to check its build log.`;
-    case 'unavailable': return 'The configured connector environment is unavailable.';
-    default: return 'Set up a workspace environment to launch Codex and Claude Code from this App.';
+    case 'unavailable': return 'The connector environment is unavailable. Create or link another one.';
+    default: return 'Workspace SSH is off. Create or link a connector environment.';
   }
 }
 
@@ -202,9 +193,10 @@ function renderSetup() {
   const setup = data?.setup || {state: 'unconfigured'};
   const {state, name, id, mode} = setup;
   const ssh = mode === 'ssh';
+  const ready = ssh || state === 'ready';
   const buildPending = state === 'building';
-  byId('connector-setup-banner').hidden = ssh || state === 'ready';
-  byId('connector-setup-status').textContent = setupMessage(state, name, mode);
+  byId('connector-setup-banner').hidden = ready;
+  byId('connector-setup-status').textContent = ready ? '' : setupMessage(state, name);
   byId('connector-setup-open').textContent = state === 'unconfigured' ? 'Set up agent sessions' : 'View setup';
   clearTimeout(setupTimer);
   if (buildPending) {
@@ -215,21 +207,25 @@ function renderSetup() {
   }
   if (!setupDialog.open) return;
   const connection = byId('setup-connection-state');
-  connection.textContent = !setupDetails ? '' : ssh || state === 'ready' ? 'Ready'
+  const appProblem = Object.values(appSettingStates()).some(Boolean);
+  connection.textContent = !setupDetails ? '' : ready ? (appProblem ? 'Check App settings' : 'Ready')
     : {building: 'Building…', failed: 'Build failed', unavailable: 'Unavailable'}[state] || 'Needs setup';
-  connection.dataset.done = String(Boolean(setupDetails) && (ssh || state === 'ready'));
+  connection.dataset.done = String(Boolean(setupDetails) && ready && !appProblem);
   if (!setupDetails) return;
-  byId('setup-feedback').textContent = setupMessage(state, name, mode);
-  byId('setup-sharing-warning').hidden = false;
-  byId('setup-ssh-mode').hidden = !ssh;
-  byId('setup-environment').hidden = ssh;
+  byId('setup-feedback').textContent = ready || buildPending ? '' : setupMessage(state, name);
+  const environment = byId('setup-environment');
+  const summary = byId('setup-environment-summary');
+  const wasReady = !summary.hidden;
+  if (environment.hidden || wasReady !== ready) environment.open = !ready;
+  environment.hidden = ssh;
+  summary.hidden = !ready;
   if (ssh) return;
   byId('setup-create').hidden = !['unconfigured', 'unavailable'].includes(state);
   byId('setup-create').disabled = setupBusy || !setupDetails.base;
   byId('setup-create').textContent = setupDetails.base
     ? `Create from ${setupDetails.base.name}` : 'Create private environment';
   if (!setupDetails.base && state === 'unconfigured') {
-    byId('setup-feedback').textContent = 'Choose a successfully built default compute environment in your App project, or link an existing connector environment.';
+    byId('setup-feedback').textContent = 'Workspace SSH is off. Link a connector environment or set a built default environment in the App project.';
   }
   const environmentLink = byId('setup-environment-link');
   environmentLink.hidden = !id;
@@ -237,7 +233,7 @@ function renderSetup() {
   byId('setup-link').querySelector('button').disabled = setupBusy;
 }
 
-async function openSetup({welcome = false, signIn = false, provider} = {}) {
+async function openSetup({signIn = false, provider} = {}) {
   if (setupDialog.open) return;
   if (!data) {
     try {
@@ -249,10 +245,10 @@ async function openSetup({welcome = false, signIn = false, provider} = {}) {
     if (setupDialog.open) return;
   }
   setupDetails = null;
-  for (const id of ['setup-options', 'setup-ssh-mode', 'setup-environment', 'setup-sharing-warning']) byId(id).hidden = true;
-  byId('setup-owner').textContent = '';
+  byId('setup-environment').hidden = true;
+  byId('setup-app-details').hidden = true;
+  byId('setup-app-details').open = false;
   byId('setup-feedback').textContent = 'Finding this Domino App…';
-  byId('setup-welcome').hidden = !welcome;
   credentialUI.removing = null;
   if (provider) credentialUI.open.add(provider);
   credentialFeedback('');
@@ -267,7 +263,7 @@ async function openSetup({welcome = false, signIn = false, provider} = {}) {
     appSettings = setupDetails.appSettings || {};
     renderAppSettings();
     byId('setup-owner').textContent = `${owner} · ${appUrl}`;
-    byId('setup-options').hidden = false;
+    byId('setup-app-details').hidden = false;
     data.setup = mode === 'ssh' ? {mode, state: 'ready'} : {mode, ...environment};
     renderSetup();
   } catch (error) {
@@ -296,36 +292,86 @@ async function configureConnector(mode, environmentId) {
 }
 
 // Agent sign-in. The App saves it to the owner's Domino user environment variables.
-const CODEX_VARIABLE_DIR = '$HOME/.codex-domino';
+const SIGN_IN_PLATFORMS = {
+  mac: {label: 'macOS', shell: 'Terminal'},
+  linux: {label: 'Linux', shell: 'Bash'},
+  windows: {label: 'Windows', shell: 'PowerShell'},
+};
+const browserPlatform = navigator.userAgentData?.platform || navigator.platform;
+const defaultSignInPlatform = /^Win/i.test(browserPlatform) ? 'windows'
+  : /^Mac/i.test(browserPlatform) ? 'mac' : 'linux';
+const unixCodexLogin = [
+  '(',
+  '  CODEX_HOME=$(mktemp -d) || exit 1',
+  '  export CODEX_HOME',
+  `  trap 'rm -rf -- "$CODEX_HOME"' EXIT`,
+  '  codex login -c cli_auth_credentials_store=file || exit 1',
+  '  encoded=$(base64 < "$CODEX_HOME/auth.json") || exit 1',
+];
+const codexExistingUnix = `base64 < "\${CODEX_HOME:-$HOME/.codex}/auth.json" | tr -d '\\r\\n'`;
+const claudeInstallUnix = 'curl -fsSL https://claude.ai/install.sh | bash';
 const SIGN_IN_GUIDES = {
   claude: {
     command: 'claude setup-token',
-    after: 'A browser window opens. Sign in with your Claude account. The terminal then prints a token that starts with sk-ant-oat01-. Copy the whole token.',
-    install: ['No Claude Code on your Mac? Install it first:', 'curl -fsSL https://claude.ai/install.sh | bash'],
-    others: [
-      ['Not on a Mac? The same command works in Linux and Windows terminals.', null],
-    ],
+    after: 'Sign in with your Claude account in the browser. Copy the full token printed in your terminal.',
+    installUrl: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
+    platforms: {
+      mac: {install: claudeInstallUnix},
+      linux: {install: claudeInstallUnix},
+      windows: {install: 'irm https://claude.ai/install.ps1 | iex'},
+    },
     paste: 'Paste the token',
     placeholder: 'sk-ant-oat01-…',
     lifetime: 'Claude Code tokens last about a year. This App reminds you a month before it expires.',
     manualLifetime: 'Claude Code tokens last about a year.',
   },
   codex: {
-    command: `(export CODEX_HOME="${CODEX_VARIABLE_DIR}"; mkdir -p "$CODEX_HOME" && codex login -c 'cli_auth_credentials_store="file"' && base64 < "$CODEX_HOME/auth.json" | tr -d '\\n' | pbcopy && echo "Copied. Paste it into Domino Agent Herd."; rm -rf "$CODEX_HOME")`,
-    after: 'A browser window opens. Sign in with your ChatGPT account. When the terminal says Copied, your sign-in is on the clipboard. This is a separate sign-in for Domino, so Codex on your Mac stays signed in.',
-    install: ['No Codex on your Mac? Install it first:', 'brew install --cask codex'],
-    others: [
-      ['Already signed in to Codex on this Mac? You can copy that sign-in instead:',
-        `base64 < "\${CODEX_HOME:-$HOME/.codex}/auth.json" | tr -d '\\n' | pbcopy`],
-      ['On Linux, remove | pbcopy from the command and copy the text it prints.', null],
-    ],
-    paste: 'Paste with ⌘V',
+    after: 'Sign in with your ChatGPT account in the browser.',
+    installUrl: 'https://developers.openai.com/codex/cli#install-codex',
+    platforms: {
+      mac: {
+        command: [...unixCodexLogin,
+          `  printf '%s' "$encoded" | tr -d '\\r\\n' | pbcopy && printf 'Copied.\\n'`, ')'].join('\n'),
+        result: 'When the terminal says Copied, paste the sign-in below.',
+        existing: codexExistingUnix + ' | pbcopy',
+      },
+      linux: {
+        command: [...unixCodexLogin,
+          `  printf '%s' "$encoded" | tr -d '\\r\\n'`, `  printf '\\n'`, ')'].join('\n'),
+        result: 'Copy the full base64 line printed in the terminal and paste it below.',
+        existing: codexExistingUnix + `; printf '\\n'`,
+      },
+      windows: {
+        command: `& {
+  $ErrorActionPreference = 'Stop'
+  $previousHome = $env:CODEX_HOME
+  $tempHome = Join-Path ([IO.Path]::GetTempPath()) (New-Guid)
+  New-Item -ItemType Directory -Path $tempHome | Out-Null
+  try {
+    $env:CODEX_HOME = $tempHome
+    codex login -c cli_auth_credentials_store=file
+    if ($LASTEXITCODE -ne 0) { throw 'Codex sign-in failed.' }
+    $authPath = Join-Path $tempHome 'auth.json'
+    Set-Clipboard -Value ([Convert]::ToBase64String([IO.File]::ReadAllBytes($authPath)))
+    Write-Output 'Copied.'
+  } finally {
+    $env:CODEX_HOME = $previousHome
+    Remove-Item -LiteralPath $tempHome -Recurse -Force
+  }
+}`,
+        result: 'When PowerShell says Copied, paste the sign-in below.',
+        existing: `$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
+$authPath = Join-Path $codexHome 'auth.json'
+Set-Clipboard -Value ([Convert]::ToBase64String([IO.File]::ReadAllBytes($authPath)))`,
+      },
+    },
+    paste: 'Paste the sign-in',
     placeholder: 'ewogICJhdXRoX21vZGUi…',
     lifetime: 'Codex keeps this sign-in fresh. If a workspace asks you to sign in to Codex again, repeat these steps.',
   },
 };
 const credentialDate = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium'});
-const credentialUI = {loading: false, open: new Set(), removing: null, busy: null, drafts: {}};
+const credentialUI = {loading: false, open: new Set(), removing: null, busy: null, drafts: {}, platforms: {}};
 
 // Browsers can block storage, for example in an embedded frame. The page works without it.
 function storageGet(key, area = 'localStorage') {
@@ -436,7 +482,7 @@ function commandBlock(command, label) {
       copy.textContent = 'Copied';
     } catch {
       getSelection().selectAllChildren(code);
-      copy.textContent = 'Press ⌘C';
+      copy.textContent = defaultSignInPlatform === 'mac' ? 'Press ⌘C' : 'Press Ctrl+C';
     }
     setTimeout(() => { copy.textContent = 'Copy'; }, 2000);
   });
@@ -458,19 +504,40 @@ function guideStep(number, ...children) {
 function signInGuide(provider) {
   const guide = SIGN_IN_GUIDES[provider.key];
   const credentials = data.credentials;
-  const runIntro = element('p');
-  runIntro.append(element('strong', 'On your Mac,'), ' open Terminal and run:');
-  const install = element('p', guide.install[0] + ' ', 'meta');
-  install.append(element('code', guide.install[1]));
-  const others = element('details', '', 'guide-options');
-  others.append(element('summary', 'Other options'));
-  for (const [text, command] of guide.others) {
-    others.append(element('p', text, 'meta'));
-    if (command) others.append(commandBlock(command, 'alternative command'));
+  const platformLabel = element('label', 'Operating system', 'guide-platform');
+  const platform = element('select');
+  for (const [key, {label}] of Object.entries(SIGN_IN_PLATFORMS)) {
+    const option = element('option', label);
+    option.value = key;
+    platform.append(option);
   }
+  platform.value = credentialUI.platforms[provider.key] || defaultSignInPlatform;
+  platformLabel.append(platform);
+  const instructions = element('div');
+  function showPlatform() {
+    const {shell} = SIGN_IN_PLATFORMS[platform.value];
+    const {command, result, install, existing} = guide.platforms[platform.value];
+    const intro = element('p', `Open ${shell} and run this command.`);
+    const installHelp = element('details', '', 'guide-options');
+    installHelp.append(element('summary', `Install ${provider.name}`));
+    if (install) installHelp.append(commandBlock(install, `${provider.name} install command`));
+    installHelp.append(link('Installation guide', guide.installUrl));
+    instructions.replaceChildren(intro, commandBlock(command || guide.command, `${provider.name} sign-in command`),
+      element('p', [guide.after, result].filter(Boolean).join(' '), 'meta'), installHelp);
+    if (existing) {
+      const options = element('details', '', 'guide-options');
+      options.append(element('summary', 'Use an existing file-based Codex sign-in'),
+        commandBlock(existing, 'existing Codex sign-in command'));
+      instructions.append(options);
+    }
+  }
+  platform.addEventListener('change', () => {
+    credentialUI.platforms[provider.key] = platform.value;
+    showPlatform();
+  });
+  showPlatform();
   const steps = element('ol', '', 'guide-steps');
-  steps.append(guideStep(1, runIntro, commandBlock(guide.command, `${provider.name} sign-in command`),
-    element('p', guide.after, 'meta'), install, others));
+  steps.append(guideStep(1, platformLabel, instructions));
 
   if (credentials.writable) {
     const form = element('form', '', 'guide-paste');
@@ -2142,7 +2209,6 @@ byId('app-settings-banner-dismiss').addEventListener('click', () => {
 });
 setupDialog.addEventListener('close', () => {
   storageSet('workspace-sessions-setup-seen', '1');
-  byId('setup-welcome').hidden = true;
 });
 byId('setup-create').addEventListener('click', () => configureConnector('create'));
 byId('setup-link').addEventListener('submit', event => {
@@ -2168,7 +2234,7 @@ document.addEventListener('visibilitychange', autoRefresh);
 renderAppSettings();
 refresh().then(() => {
   notice('');
-  if (needsFirstRunSetup()) openSetup({welcome: true});
+  if (needsFirstRunSetup()) openSetup();
   else loadAppSettings();
 }).catch(error => notice(error.message, true));
 

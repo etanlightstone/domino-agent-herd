@@ -153,25 +153,18 @@
     <h2 id="setup-heading">Domino Agent Herd setup</h2>
     <form method="dialog"><button>Close</button></form>
   </div>
-  <p id="setup-welcome" class="setup-welcome" hidden>Welcome to Domino Agent Herd! Two quick steps get Codex and Claude Code running in your Domino workspaces. Come back any time with the <strong>Setup</strong> button.</p>
-  <p id="setup-sharing-warning" hidden><strong>Keep this App owner-only.</strong> Anyone with access can manage workspaces and agent sessions using the project owner’s permissions. Review the App’s sharing settings in Domino.</p>
   <ol class="setup-steps">
     <li class="setup-step" id="setup-step-connection">
       <div class="step-heading">
         <span class="step-marker" aria-hidden="true">1</span>
-        <h3>Workspace connection</h3>
+        <h3>Connect workspaces</h3>
         <span id="setup-connection-state" class="step-state"></span>
       </div>
-      <p id="setup-owner" class="meta"></p>
       <ul id="setup-app-settings" class="app-settings" aria-label="App settings in Domino" hidden></ul>
       <p id="setup-feedback" role="status"></p>
-      <div id="setup-ssh-mode" hidden>
-        <p>Workspaces you start or resume from this App turn on Domino workspace SSH. The App then connects Codex and Claude Code in each workspace’s own compute environment. Environments need <code>openssh-server</code>, which Domino Standard Environments include.</p>
-      </div>
-      <section id="setup-environment" hidden>
-        <h4 id="setup-environment-heading">Connector environment</h4>
-        <p class="meta">Workspace SSH is off in this Domino deployment, so workspaces connect through an environment whose pre-run script starts the connector.</p>
-        <div id="setup-options" hidden>
+      <details id="setup-environment" hidden>
+        <summary id="setup-environment-summary">Change connector environment</summary>
+        <div id="setup-options">
           <div class="actions">
             <button id="setup-create" type="button" class="primary" aria-describedby="setup-sharing-warning">Create private environment</button>
             <a id="setup-environment-link" target="_blank" rel="noopener" hidden>Open environment in Domino</a>
@@ -180,11 +173,10 @@
             <label>Existing connector environment ID
               <input name="environmentId" required pattern="[0-9a-f]{24}" spellcheck="false">
             </label>
-            <p class="meta">Use an environment whose pre-run script points to this App.</p>
             <div><button type="submit" aria-describedby="setup-sharing-warning">Link environment</button></div>
           </form>
         </div>
-      </section>
+      </details>
     </li>
     <li class="setup-step" id="setup-step-signin">
       <div class="step-heading">
@@ -192,12 +184,17 @@
         <h3>Agent sign-in</h3>
         <span id="setup-signin-state" class="step-state"></span>
       </div>
-      <p class="meta">Set up the agents you use: one or both. You sign in on your Mac and paste the result here. The App saves it as a Domino user environment variable, so every workspace you start is already signed in. Return here when a sign-in expires or to add the other agent.</p>
+      <p class="meta">Sign in to either agent or both.</p>
       <p id="credentials-feedback" role="status" hidden></p>
       <div id="credential-providers"></div>
     </li>
   </ol>
   <div class="setup-footer">
+    <details id="setup-app-details" hidden>
+      <summary>App details</summary>
+      <p id="setup-owner" class="meta"></p>
+      <p id="setup-sharing-warning" class="meta"><strong>Keep this App owner-only.</strong> Anyone with access can manage workspaces and agent sessions using the project owner’s permissions.</p>
+    </details>
     <button id="setup-done" type="button" class="primary">Done</button>
   </div>
 </dialog>
