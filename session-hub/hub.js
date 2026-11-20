@@ -518,7 +518,9 @@ async function saveCredential(provider, value) {
     data.credentials = credentials;
     credentialUI.open.delete(provider.key);
     delete credentialUI.drafts[provider.key];
-    credentialFeedback(`${provider.name} sign-in saved to Domino. New ${provider.name} sessions you open here use it, including in running workspaces. If a workspace still asks you to sign in, restart it.`);
+    const outdated = outdatedWorkspaces();
+    credentialFeedback(`${provider.name} sign-in saved to Domino. New ${provider.name} sessions you open here use it, including in running workspaces.` +
+      (outdated.length ? ` Restart ${outdated.map(workspaceLabel).join(', ')} first. ${outdated.length === 1 ? 'It runs' : 'They run'} an older connector. Open ${outdated.length === 1 ? 'it' : 'each one'} and choose Restart workspace.` : ''));
   } catch (error) {
     credentialFeedback(error.message, true);
   } finally {
@@ -795,6 +797,7 @@ function showAgents(workspace, preferred) {
   byId('ide-panel').hidden = true;
   byId('agent-empty').hidden = true;
   byId('agent-restart').hidden = true;
+  byId('connector-update').hidden = true;
   agentNotice('Loading agent sessions…');
   if (transfer) {
     restoreNormalTerminal(transfer);
@@ -990,6 +993,8 @@ async function loadAgents(workspace) {
     const list = await api(agentPath(workspace) + '?live=1');
     if (agentWorkspace !== workspace || load !== loadNumber) return;
     workspace.connector.connected = list.connected;
+    workspace.connector.outdated = Boolean(list.outdated);
+    renderConnectorUpdate(workspace);
     if (!list.ready) {
       byId('agent-controls').replaceChildren();
       const canRestart = !list.connected && workspace.canEnable && data.managedAvailable;
@@ -1708,6 +1713,20 @@ async function watchWorkspaceAction(workspace, deleting) {
   }
 }
 
+function renderConnectorUpdate(workspace) {
+  const bar = byId('connector-update');
+  bar.hidden = !(workspace.connector?.connected && workspace.connector.outdated) || agentWorkspace !== workspace;
+  const control = byId('connector-update-button');
+  const busy = restarting.has(workspace.id);
+  control.disabled = busy;
+  control.textContent = busy ? 'Restarting workspace…' : 'Restart workspace';
+}
+
+function outdatedWorkspaces() {
+  return data?.workspaces.filter(workspace => workspace.running && workspace.connector?.connected &&
+    workspace.connector.outdated) || [];
+}
+
 function renderConnectorRestart(workspace) {
   const busy = restarting.has(workspace.id);
   const action = byId('agent-restart-button');
@@ -1725,9 +1744,11 @@ function confirmConnectorRestart(workspace) {
   dialogBody.replaceChildren(
     element('h2', 'Restart workspace?'),
     element('strong', workspaceLabel(workspace)),
-    element('p', data.setup?.mode === 'ssh'
-      ? 'This ends running processes. Domino then resumes the workspace in its current environment with SSH on, and this App connects its agent sessions.'
-      : 'This ends running processes. Domino will then resume the workspace and connect it to this App when the connector is available.'),
+    element('p', workspace.connector?.outdated
+      ? 'This ends running processes, including open agent sessions. Saved conversations reappear in History. Domino then resumes the workspace with your current Domino sign-in, and this App starts its current connector there.'
+      : data.setup?.mode === 'ssh'
+        ? 'This ends running processes. Domino then resumes the workspace in its current environment with SSH on, and this App connects its agent sessions.'
+        : 'This ends running processes. Domino will then resume the workspace and connect it to this App when the connector is available.'),
     button('Restart workspace', () => {
       dialog.close();
       restartWithConnector(workspace);
@@ -1740,6 +1761,7 @@ async function restartWithConnector(workspace) {
   if (restarting.has(workspace.id)) return;
   restarting.add(workspace.id);
   renderConnectorRestart(workspace);
+  renderConnectorUpdate(workspace);
   const path = `projects/${workspace.projectId}/workspaces/${workspace.id}`;
   try {
     await api(path + '/stop-for-connector', {confirmed: true});
@@ -1760,7 +1782,10 @@ async function restartWithConnector(workspace) {
     if (agentWorkspace === workspace) agentNotice(error.message, true);
   } finally {
     restarting.delete(workspace.id);
-    if (agentWorkspace?.id === workspace.id) renderConnectorRestart(agentWorkspace);
+    if (agentWorkspace?.id === workspace.id) {
+      renderConnectorRestart(agentWorkspace);
+      renderConnectorUpdate(agentWorkspace);
+    }
   }
 }
 
@@ -1875,6 +1900,7 @@ byId('history-search').addEventListener('input', renderHistory);
 byId('browse-projects').addEventListener('click', browseProjects);
 byId('empty-browse').addEventListener('click', browseProjects);
 byId('agent-restart-button').addEventListener('click', () => confirmConnectorRestart(agentWorkspace));
+byId('connector-update-button').addEventListener('click', () => confirmConnectorRestart(agentWorkspace));
 for (const id of ['workspace-tabs', 'agent-running']) {
   byId(id).addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;

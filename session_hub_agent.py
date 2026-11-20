@@ -1,6 +1,7 @@
 """Workspace-side connector for managing Herdr Codex and Claude Code sessions."""
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,23 @@ import requests
 
 APP_URL = sys.argv[1]
 BOOTSTRAP = sys.argv[2]
+
+
+def connector_version(*paths):
+    """Fingerprint of the files this connector runs from. The App compares it with its own copy."""
+    digest = hashlib.sha256()
+    for path in paths:
+        contents = Path(path).read_bytes()
+        digest.update(len(contents).to_bytes(8, "big"))
+        digest.update(contents)
+    return digest.hexdigest()[:16]
+
+
+try:
+    # Read at startup, so the fingerprint describes the code running now.
+    VERSION = connector_version(__file__, BOOTSTRAP)
+except OSError:
+    VERSION = None
 PROJECT = os.environ["DOMINO_PROJECT_ID"]
 RUN = os.environ["DOMINO_RUN_ID"]
 CODE_ROOT = Path("/mnt/code")
@@ -748,7 +766,8 @@ class Connection:
 
     def register(self, client):
         token = self.access_token()
-        result = self.post(client, "register", {"run": RUN, "project": PROJECT, "token": token})
+        result = self.post(client, "register", {"run": RUN, "project": PROJECT, "token": token,
+                                                "version": VERSION})
         if not result.ok:
             raise RuntimeError(f"Connector registration returned HTTP {result.status_code}.")
         data = result.json()

@@ -21,7 +21,21 @@ from session_hub_ssh import Bootstrapper, GatewayError, bootstrap_script, run_ov
 app = Flask(__name__, static_folder="session-hub", static_url_path="/assets")
 app.config["MAX_CONTENT_LENGTH"] = 850_000
 actions = Lock()
-broker = Broker()
+
+def connector_version(*paths):
+    """Fingerprint of the connector files. session_hub_agent.py computes the same value for itself."""
+    digest = hashlib.sha256()
+    for path in paths:
+        contents = Path(path).read_bytes()
+        digest.update(len(contents).to_bytes(8, "big"))
+        digest.update(contents)
+    return digest.hexdigest()[:16]
+
+
+# Workspaces get byte-for-byte copies of these files, so a different fingerprint means an older connector.
+CONNECTOR_VERSION = connector_version(*(Path(__file__).resolve().parent / name
+                                        for name in ("session_hub_agent.py", "herdr-workspace.sh")))
+broker = Broker(CONNECTOR_VERSION)
 setup_variable = "SESSION_HUB_CONNECTOR_ENVIRONMENT"
 # "ssh" or "environment" overrides detection of Domino's workspace SSH setting.
 mode_override = os.environ.get("SESSION_HUB_CONNECTION_MODE")
@@ -743,7 +757,10 @@ def stop_for_connector(pid, wid):
         workspace = domino(workspace_path(pid, wid))
         if workspace["ownerName"] != owner or workspace["deleted"]:
             abort(403, "Only your workspaces can be restarted from the app.")
-        if ssh_mode():
+        run = (workspace.get("mostRecentSession") or {}).get("executionId")
+        if run and broker.status(run)["outdated"]:
+            pass  # A restart starts the connector this App ships.
+        elif ssh_mode():
             if run_ssh_enabled(workspace) and workspace["state"] != "Stopped":
                 abort(409, "SSH is already on for this workspace run.")
         elif not connector_compatibility(workspace.get("configTemplate") or {}) or not managed_ready():
@@ -844,7 +861,8 @@ def connector_register():
         session = workspace.get("mostRecentSession") or {}
         if (workspace["projectId"] == pid and workspace["ownerName"] == owner and not workspace["deleted"]
                 and session.get("executionId") == run and (session.get("sessionStatusInfo") or {}).get("isRunning")):
-            return jsonify(key=broker.register(run, pid), protocol=2)
+            version = data.get("version") if isinstance(data.get("version"), str) else None
+            return jsonify(key=broker.register(run, pid, version and version[:64]), protocol=2)
     abort(403, "Domino has not marked this workspace as running for this account.")
 
 

@@ -18,6 +18,7 @@ class Workspace:
     replies: dict = field(default_factory=dict)
     ready: bool = False
     detail: str = "Preparing Herdr and the agent CLIs."
+    version: str | None = None
 
 
 @dataclass
@@ -30,15 +31,17 @@ class Terminal:
 
 
 class Broker:
-    def __init__(self):
+    def __init__(self, version=None):
+        # Fingerprint of the connector files this App ships. Connectors report theirs at registration.
+        self.version = version
         self.workspaces = {}
         self.terminals = {}
         self.changed = Condition()
 
-    def register(self, run, project):
+    def register(self, run, project, version=None):
         with self.changed:
             self.prune()
-            worker = Workspace(token_urlsafe(32), project)
+            worker = Workspace(token_urlsafe(32), project, version=version)
             self.workspaces[run] = worker
             self.changed.notify_all()
             return worker.key
@@ -60,8 +63,10 @@ class Broker:
         with self.changed:
             self.prune()
             worker = self.workspaces.get(run)
+            # Connectors from before versioning report none, so they count as outdated too.
             return {"connected": bool(worker), "ready": bool(worker and worker.ready),
-                    "detail": worker.detail if worker else None}
+                    "detail": worker.detail if worker else None,
+                    "outdated": bool(worker and self.version and worker.version != self.version)}
 
     def poll(self, run, key, data, *, commands=True, wait=0):
         with self.changed:

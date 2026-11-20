@@ -64,7 +64,7 @@ The Codex command keeps its login in its own temporary `CODEX_HOME`, so Codex on
 **How sign-in reaches workspaces.**
 
 - Workspaces receive user environment variables when they start.
-- When you open a new session, the App also hands the connector its current sign-in, so renewed credentials work in workspaces that are already running. This applies to workspaces whose connector started with this App version. Restart older workspaces once.
+- When you open a new session, the App also hands the connector its current sign-in, so renewed credentials work in workspaces that are already running. A workspace whose connector came from an earlier App version shows a bar with **Restart workspace**. Restart it once to pick up the current connector.
 - A workspace keeps a Codex login that Codex refreshed in it. It switches to the saved login only when that one is newer. Claude Code tokens from the App are kept per workspace run, in `~/.cache/domino-herdr/credentials`.
 - If a project also defines `CLAUDE_CODE_OAUTH_TOKEN` or `CODEX_AUTH_JSON_B64`, its workspaces can start with that project value. Remove it if the sign-in saved in Setup doesn’t take effect there.
 
@@ -80,4 +80,5 @@ Agent sessions opened by this App use `codex --yolo` and `claude --dangerously-s
 - **New project, same Domino account and deployment.** The new App can see the same workspaces. With workspace SSH, it connects running SSH-enabled workspaces without setup. With connector environments, create one in the new App with the same base environment and revision as the previous one, or point an existing environment's hook at the new URL and link it. Workspaces already using a linked environment connect on their next start.
 - **Resume a stopped workspace.** Choose **Resume workspace**. With workspace SSH, Domino resumes it in its own environment with SSH on. With connector environments, the App uses its connector environment when it is ready and the workspace uses the same base revision or a compatible previous connector environment. When the switch is unavailable, Domino starts the workspace with its existing settings. Domino keeps the workspace ID and storage.
 - **Connect a running workspace.** Running workspaces with SSH on connect automatically. If the sessions pane offers **Restart workspace**, use it to stop running processes and start the workspace again.
+- **Update the App.** The App compares each connector's files with its own. Workspaces still running an earlier connector show **Restart workspace** in their sessions pane. Restarting ends live agent processes, then Domino resumes the workspace and the App starts its current connector there.
 - **Agent sessions.** Herdr, live agent processes, and saved Codex and Claude Code history reside in each workspace. Restarting a workspace ends its live processes. Saved conversations from a persisted home or configured history directory reappear in **History** when its connector reconnects.

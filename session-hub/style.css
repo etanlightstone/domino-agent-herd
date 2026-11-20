@@ -259,3 +259,5 @@ button.confirm-danger:hover { background: #a40922; color: white; }
 .guide-paste textarea.secret:not(:placeholder-shown) { -webkit-text-security: disc; }
 .setup-footer { display: flex; justify-content: flex-end; margin-top: 14px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+.connector-update { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 6px 12px; color: var(--warning); background: var(--warning-bg); font-size: .83rem; }
+.connector-update button { padding: 3px 9px; font-size: .82rem; }
