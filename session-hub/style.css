@@ -263,3 +263,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 .connector-update button { padding: 3px 9px; font-size: .82rem; }
 .signin-alert { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 7px 12px; color: var(--ink); background: var(--warning-bg); border-bottom: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border)); font-size: .85rem; }
 .signin-alert button { padding: 3px 9px; font-size: .82rem; }
+.app-settings { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 4px; font-size: .84rem; }
+.app-settings li { padding-left: 22px; position: relative; color: var(--muted); }
+.app-settings li::before { position: absolute; left: 2px; font-weight: 700; }
+.app-settings li[data-state=ok]::before { content: '✓'; color: var(--success); }
+.app-settings li[data-state=problem] { color: var(--ink); }
+.app-settings li[data-state=problem]::before { content: '!'; color: var(--warning); left: 6px; }
+.app-settings li[data-state=unknown]::before { content: '•'; }
+#app-settings-banner { background: var(--warning-bg); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }

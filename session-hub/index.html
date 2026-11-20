@@ -30,6 +30,10 @@
     </button>
   </div>
   <p id="status" role="status">Loading workspaces…</p>
+  <div id="app-settings-banner" class="setup-banner" role="alert" hidden>
+    <span id="app-settings-banner-status"></span>
+    <button id="app-settings-banner-dismiss" type="button" hidden>Not now</button>
+  </div>
   <div id="connector-setup-banner" class="setup-banner" hidden>
     <span id="connector-setup-status" role="status"></span>
     <button id="connector-setup-open" type="button" class="primary">Set up agent sessions</button>
@@ -145,6 +149,7 @@
         <span id="setup-connection-state" class="step-state"></span>
       </div>
       <p id="setup-owner" class="meta"></p>
+      <ul id="setup-app-settings" class="app-settings" aria-label="App settings in Domino" hidden></ul>
       <p id="setup-feedback" role="status"></p>
       <div id="setup-ssh-mode" hidden>
         <p>Workspaces you start or resume from this App turn on Domino workspace SSH. The App then connects Codex and Claude Code in each workspace’s own compute environment. Environments need <code>openssh-server</code>, which Domino Standard Environments include.</p>

@@ -102,7 +102,7 @@ function render() {
   const retained = running.find(workspace => workspace.id === agentWorkspace?.id &&
     workspace.run === agentWorkspace?.run);
   if (retained) Object.assign(agentWorkspace, retained);
-  const previous = localStorage.getItem('workspace-sessions-active');
+  const previous = storageGet('workspace-sessions-active');
   const next = retained || running.find(workspace => workspace.id === previous) ||
     running.find(workspace => workspace.connector.ready) || running[0];
   if (splitActive) {
@@ -129,6 +129,59 @@ function render() {
   renderDetail();
   renderSetup();
   renderCredentialsBanner();
+}
+
+// Two App settings matter: identity passthrough must be off, and deep linking should be on.
+let appSettings;
+// Embedded frames can block storage, so also remember the dismissal for this page.
+let deepLinkDismissed = false;
+const inHeaderFrame = (() => {
+  try { return window.self !== window.top; } catch { return true; }
+})();
+const APP_SETTING_TEXT = {
+  passthrough: 'Identity passthrough is on. Turn it off in this App’s settings in Domino, then republish. This App acts as its project owner and doesn’t work when Domino passes each viewer’s identity to it.',
+  deepLinking: 'Deep linking is off, so Domino’s header takes up screen space above this App. Turn on Allow deep linking in this App’s settings in Domino, then open the App again.',
+};
+
+function appSettingStates() {
+  const passthrough = appSettings?.identityPassthrough;
+  return {
+    // true means a problem, false means fine, null means Domino didn't say.
+    passthrough: passthrough === true ? true : passthrough === false ? false : null,
+    deepLinking: inHeaderFrame || appSettings?.headerFrame === true ? true
+      : appSettings?.headerFrame === false || appSettings ? false : null,
+  };
+}
+
+function renderAppSettings() {
+  const states = appSettingStates();
+  const banner = byId('app-settings-banner');
+  const urgent = states.passthrough ? 'passthrough'
+    : states.deepLinking && !deepLinkDismissed && !storageGet('workspace-sessions-deep-link-dismissed')
+      ? 'deepLinking' : null;
+  banner.hidden = !urgent;
+  if (urgent) byId('app-settings-banner-status').textContent = APP_SETTING_TEXT[urgent];
+  byId('app-settings-banner-dismiss').hidden = urgent !== 'deepLinking';
+  const list = byId('setup-app-settings');
+  list.hidden = !setupDialog.open || (!appSettings && !inHeaderFrame);
+  if (list.hidden) return;
+  const item = (problem, good, unknown, key) => {
+    const row = element('li', problem ? APP_SETTING_TEXT[key] : problem === false ? good : unknown);
+    row.dataset.state = problem ? 'problem' : problem === false ? 'ok' : 'unknown';
+    return row;
+  };
+  list.replaceChildren(
+    item(states.passthrough, 'Identity passthrough is off.', 'Keep identity passthrough off in this App’s settings in Domino.', 'passthrough'),
+    item(states.deepLinking, 'Deep linking is on, so the App opens without Domino’s header.', 'Turn on Allow deep linking in this App’s settings so the App opens without Domino’s header.', 'deepLinking'));
+}
+
+async function loadAppSettings() {
+  try {
+    appSettings = (await api('setup?' + new URLSearchParams({appUrl: setupAppUrl}))).appSettings || {};
+  } catch {
+    // Setup reports problems finding the App. The header-frame check still works without it.
+  }
+  renderAppSettings();
 }
 
 function setupMessage(state, name, mode) {
@@ -202,11 +255,14 @@ async function openSetup({welcome = false, signIn = false, provider} = {}) {
   credentialFeedback('');
   setupDialog.showModal();
   renderSetup();
+  renderAppSettings();
   loadCredentials();
   if (signIn) byId('setup-step-signin').scrollIntoView({block: 'start'});
   try {
     setupDetails = await api('setup?' + new URLSearchParams({appUrl: setupAppUrl}));
     const {owner, appUrl, environment, mode} = setupDetails;
+    appSettings = setupDetails.appSettings || {};
+    renderAppSettings();
     byId('setup-owner').textContent = `${owner} · ${appUrl}`;
     byId('setup-options').hidden = false;
     data.setup = mode === 'ssh' ? {mode, state: 'ready'} : {mode, ...environment};
@@ -268,12 +324,13 @@ const SIGN_IN_GUIDES = {
 const credentialDate = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium'});
 const credentialUI = {loading: false, open: new Set(), removing: null, busy: null, drafts: {}};
 
-function storageGet(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
+// Browsers can block storage, for example in an embedded frame. The page works without it.
+function storageGet(key, area = 'localStorage') {
+  try { return window[area].getItem(key); } catch { return null; }
 }
 
-function storageSet(key, value) {
-  try { localStorage.setItem(key, value); } catch { /* The page works without saved preferences. */ }
+function storageSet(key, value, area = 'localStorage') {
+  try { window[area].setItem(key, value); } catch { /* Preferences just aren't remembered. */ }
 }
 
 function formatCredentialDate(value) {
@@ -765,7 +822,7 @@ function showAgents(workspace, preferred) {
   const wasSplit = splitActive;
   let transfer;
   if (wasSplit) {
-    const previous = sessionStorage.getItem('agent:' + workspaceKey(workspace));
+    const previous = storageGet('agent:' + workspaceKey(workspace), 'sessionStorage');
     const matches = splitTiles.map(tile => tile.terminal || tile.request)
       .filter(item => item && workspaceKey(item.workspace) === workspaceKey(workspace));
     transfer = preferred || matches.find(item => item.pane === previous) || matches[0];
@@ -786,7 +843,7 @@ function showAgents(workspace, preferred) {
   selectedPane = undefined;
   autoAttach = true;
   visibleView = 'agent';
-  localStorage.setItem('workspace-sessions-active', workspace.id);
+  storageSet('workspace-sessions-active', workspace.id);
   byId('agent-panel').hidden = false;
   byId('agent-title').textContent = workspace.project;
   byId('workspace-name').textContent = workspace.name;
@@ -1059,7 +1116,7 @@ async function loadAgents(workspace) {
     if (autoAttach && !splitActive && runningAgents.length && !normalSlot.terminal &&
         !normalSlot.request && visibleView === 'agent') {
       autoAttach = false;
-      const previous = sessionStorage.getItem('agent:' + workspaceKey(workspace));
+      const previous = storageGet('agent:' + workspaceKey(workspace), 'sessionStorage');
       selectAgent(runningAgents.find(item => item.pane === previous) || runningAgents[0]);
     }
   } catch (error) {
@@ -1182,7 +1239,7 @@ async function connectAgent(slot, workspace, payload, label, recovering = false)
     const host = request.slot;
     const shouldFocus = host === normalSlot ? visibleView === 'agent' : host.tile.contains(document.activeElement);
     const pane = opened.pane || payload.pane;
-    if (pane) sessionStorage.setItem('agent:' + workspaceKey(workspace), pane);
+    if (pane) storageSet('agent:' + workspaceKey(workspace), pane, 'sessionStorage');
     detachTerminal(host);
     openTerminal(host, workspace, pane, channel, opened.label || label, recovering);
     if (host === normalSlot) selectedPane = pane;
@@ -1961,6 +2018,11 @@ byId('credentials-banner-dismiss').addEventListener('click', () => {
   renderCredentialsBanner();
 });
 byId('setup-done').addEventListener('click', () => setupDialog.close());
+byId('app-settings-banner-dismiss').addEventListener('click', () => {
+  deepLinkDismissed = true;
+  storageSet('workspace-sessions-deep-link-dismissed', '1');
+  renderAppSettings();
+});
 setupDialog.addEventListener('close', () => {
   storageSet('workspace-sessions-setup-seen', '1');
   byId('setup-welcome').hidden = true;
@@ -1971,9 +2033,11 @@ byId('setup-link').addEventListener('submit', event => {
   configureConnector('link', new FormData(event.currentTarget).get('environmentId').trim());
 });
 byId('refresh').addEventListener('click', () => refresh().then(refreshGit).catch(error => notice(error.message, true)));
+renderAppSettings();
 refresh().then(() => {
   notice('');
   if (needsFirstRunSetup()) openSetup({welcome: true});
+  else loadAppSettings();
 }).catch(error => notice(error.message, true));
 
 const themeControl = byId('theme');
@@ -1987,10 +2051,10 @@ function setTheme(theme) {
   }
 }
 const systemTheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-setTheme(localStorage.getItem('workspace-sessions-theme') || systemTheme);
+setTheme(storageGet('workspace-sessions-theme') || systemTheme);
 themeControl.addEventListener('click', () => {
   const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  localStorage.setItem('workspace-sessions-theme', theme);
+  storageSet('workspace-sessions-theme', theme);
   setTheme(theme);
 });
 

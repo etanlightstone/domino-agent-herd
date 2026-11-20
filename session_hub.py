@@ -360,7 +360,13 @@ def save_connector_environment(environment, details):
 def get_setup():
     details = app_for_setup(request.args.get("appUrl"))
     base = base_for_setup()
+    content = (details.get("currentVersion") or details.get("latestVersion") or {}).get("content") or {}
+    # This App acts as its project owner. Domino's header frame (deep linking off) costs screen space.
+    # None means this Domino version doesn't report the setting.
+    app_settings = {"identityPassthrough": content.get("extendedIdentityPropagationToAppsEnabled"),
+                    "headerFrame": details.get("renderIFrame")}
     return jsonify(owner=owner, appUrl=details["url"], mode="ssh" if ssh_mode() else "environment",
+                   appSettings=app_settings,
                    environment=environment_status(),
                    base={"id": base["id"], "name": base["name"]} if base else None)
 
