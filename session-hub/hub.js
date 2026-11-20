@@ -308,7 +308,7 @@ const SIGN_IN_GUIDES = {
     manualLifetime: 'Claude Code tokens last about a year.',
   },
   codex: {
-    command: `(export CODEX_HOME="${CODEX_VARIABLE_DIR}"; mkdir -p "$CODEX_HOME" && codex login -c 'cli_auth_credentials_store="file"' && base64 < "$CODEX_HOME/auth.json" | tr -d '\\n' | pbcopy && echo "Copied. Paste it into Workspace Sessions."; rm -rf "$CODEX_HOME")`,
+    command: `(export CODEX_HOME="${CODEX_VARIABLE_DIR}"; mkdir -p "$CODEX_HOME" && codex login -c 'cli_auth_credentials_store="file"' && base64 < "$CODEX_HOME/auth.json" | tr -d '\\n' | pbcopy && echo "Copied. Paste it into Domino Agent Herd."; rm -rf "$CODEX_HOME")`,
     after: 'A browser window opens. Sign in with your ChatGPT account. When the terminal says Copied, your sign-in is on the clipboard. This is a separate sign-in for Domino, so Codex on your Mac stays signed in.',
     install: ['No Codex on your Mac? Install it first:', 'brew install --cask codex'],
     others: [
@@ -1950,7 +1950,7 @@ async function createDialog(project) {
       description.textContent = mode === 'ssh'
         ? 'Uses this project’s default compute environment and hardware tier. Agent sessions connect over Domino SSH.'
         : managed.checked
-          ? 'Uses the private Workspace Sessions environment and this project’s default hardware tier.'
+          ? 'Uses the private Domino Agent Herd environment and this project’s default hardware tier.'
           : 'Uses this project’s default compute environment and hardware tier.';
     }
     const managed = element('input');
@@ -2081,7 +2081,22 @@ byId('setup-link').addEventListener('submit', event => {
   event.preventDefault();
   configureConnector('link', new FormData(event.currentTarget).get('environmentId').trim());
 });
-byId('refresh').addEventListener('click', () => refresh().then(refreshGit).catch(error => notice(error.message, true)));
+// Keep the workspace list current, including workspaces started or stopped elsewhere in Domino.
+let autoRefreshFailed = false;
+async function autoRefresh() {
+  if (document.hidden || !data || document.querySelector('dialog[open]') || pending.size || changing.size) return;
+  try {
+    await refresh();
+    if (autoRefreshFailed) notice('');
+    autoRefreshFailed = false;
+  } catch (error) {
+    // One miss is usually a brief blip. Say so only when it keeps failing.
+    if (autoRefreshFailed) notice(error.message, true);
+    autoRefreshFailed = true;
+  }
+}
+setInterval(autoRefresh, 20000);
+document.addEventListener('visibilitychange', autoRefresh);
 renderAppSettings();
 refresh().then(() => {
   notice('');
@@ -2092,15 +2107,15 @@ refresh().then(() => {
 const themeControl = byId('theme');
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  const dark = theme === 'dark';
-  themeControl.setAttribute('aria-pressed', String(dark));
-  themeControl.textContent = dark ? 'Light mode' : 'Dark mode';
+  const label = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+  themeControl.setAttribute('aria-label', label);
+  themeControl.title = label;
   for (const slot of [normalSlot, ...splitTiles]) {
     if (slot.terminal) slot.terminal.view.options.theme = terminalTheme();
   }
 }
-const systemTheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-setTheme(storageGet('workspace-sessions-theme') || systemTheme);
+// Dark unless the viewer chose light. index.html applies this before the page draws.
+setTheme(storageGet('workspace-sessions-theme') || 'dark');
 themeControl.addEventListener('click', () => {
   const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   storageSet('workspace-sessions-theme', theme);

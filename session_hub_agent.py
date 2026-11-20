@@ -424,7 +424,7 @@ def launch(kind, conversation, credential=None):
     label = f"{name} · {conversation[:8] if conversation else time.strftime('%H:%M:%S')}"
     snapshot = ensure_server()["snapshot"]
     if not snapshot.get("workspaces"):
-        herdr("workspace", "create", "--cwd", str(ROOT), "--label", "Workspace Sessions")
+        herdr("workspace", "create", "--cwd", str(ROOT), "--label", "Domino Agent Herd")
     title = saved["label"] if saved else label
     pane = herdr("tab", "create", "--cwd", cwd, "--label", label)["root_pane"]["pane_id"]
     # Claude Code otherwise opens file diffs in the workspace IDE's side panel.

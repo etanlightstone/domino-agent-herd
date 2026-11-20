@@ -27,7 +27,8 @@ PROVIDERS = {
     "codex": {"name": "Codex", "variable": "CODEX_AUTH_JSON_B64"},
 }
 
-SAVED = re.compile(r"Saved by Workspace Sessions on (\d{4}-\d{2}-\d{2})")
+# Earlier versions wrote "Workspace Sessions", the App's previous name.
+SAVED = re.compile(r"Saved by (?:Domino Agent Herd|Workspace Sessions) on (\d{4}-\d{2}-\d{2})")
 CLAUDE_TOKEN = re.compile(r"sk-ant-oat\d+-[A-Za-z0-9_-]{20,}")
 TOKEN_TEXT = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -89,7 +90,7 @@ class AccountPage(HTMLParser):
 
 
 def saved_description(today=None):
-    return f"Saved by Workspace Sessions on {(today or date.today()).isoformat()}"
+    return f"Saved by Domino Agent Herd on {(today or date.today()).isoformat()}"
 
 
 def saved_on(description):

@@ -50,7 +50,7 @@ for attempt in range(30):
             last_failure = failure
         time.sleep(5)
 else:
-    raise SystemExit("Could not load the Workspace Sessions connector from the private Domino App. Check SESSION_HUB_APP_URL and App access.")
+    raise SystemExit("Could not load the Domino Agent Herd connector from the private Domino App. Check SESSION_HUB_APP_URL and App access.")
 
 os.execv(sys.executable, [
     sys.executable, str(cache / "session_hub_agent.py"), app_url,

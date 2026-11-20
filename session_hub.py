@@ -318,7 +318,7 @@ def create_connector_environment(details, base):
     return domino("/v4/environments", "POST", json={
         "newEnvironment": {
             "id": identifier,
-            "name": f"Workspace Sessions · {details['project']['name'][:32]} · {details['id'][-6:]}",
+            "name": f"Domino Agent Herd · {details['project']['name'][:32]} · {details['id'][-6:]}",
             "description": f"Connects workspaces to {details['url']}",
             "visibility": "Private", "addBaseDependencies": False, "isCurated": False,
             "skipFirstBuild": False, "rebuildOnBaseChanges": "Never", "assignLatestRevisionAsActive": True,
@@ -770,7 +770,7 @@ def stop_for_connector(pid, wid):
             if run_ssh_enabled(workspace) and workspace["state"] != "Stopped":
                 abort(409, "SSH is already on for this workspace run.")
         elif not connector_compatibility(workspace.get("configTemplate") or {}) or not managed_ready():
-            abort(409, "A compatible Workspace Sessions environment is unavailable.")
+            abort(409, "A compatible Domino Agent Herd environment is unavailable.")
         if workspace["state"] == "Stopped":
             return jsonify(id=wid)
         session = workspace.get("mostRecentSession") or {}
@@ -801,7 +801,7 @@ def create(pid):
     enable_ssh = ssh_mode()
     if data.get("managed") is True and not enable_ssh:
         if not managed_ready():
-            abort(409, "The Workspace Sessions environment is unavailable.")
+            abort(409, "The Domino Agent Herd environment is unavailable.")
         environment = connector_settings()["id"]
         revision = "ActiveRevision"
     if tool not in {item["id"] for item in available_tools(pid, environment)}:

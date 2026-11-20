@@ -1,4 +1,4 @@
-# Workspace Sessions for Domino
+# Domino Agent Herd
 
 A Domino App for switching between your workspaces and the Codex and Claude Code sessions running in them. Each workspace runs its own connector and Herdr server. The App uses the Domino identity of its project owner to list and operate on that user's workspaces.
 
@@ -11,15 +11,15 @@ A Domino App for switching between your workspaces and the Codex and Claude Code
    - **Access:** only you, the project owner. The App acts with your access to your workspaces.
    - **Identity passthrough: off.** This App acts as its project owner. It doesn't work when Domino passes each viewer’s identity to it.
    - **Allow deep linking: on.** Otherwise Domino’s header sits above the App and takes screen space from your agent terminals.
-3. **Open the App at its own URL.** **Setup** opens on first use and walks you through the rest: connecting your workspaces, then signing in to Claude Code, Codex, or both. Setup also checks the two App settings above. Reopen **Setup** from the header at any time, for example to renew a sign-in.
+3. **Open the App at its own URL.** **Setup** opens on first use and walks you through the rest: connecting your workspaces, then signing in to Claude Code, Codex, or both. Setup also checks the two App settings above. Reopen it any time with the **Setup** button next to your workspace tabs, for example to renew a sign-in.
 
-Workspaces started from a Domino Standard Environment work as they are. Other workspace environments need `openssh-server`, Python 3 with `requests`, Bash, `flock`, and `setsid`. Use one Workspace Sessions App per Domino project.
+Workspaces started from a Domino Standard Environment work as they are. Other workspace environments need `openssh-server`, Python 3 with `requests`, Bash, `flock`, and `setsid`. Use one Domino Agent Herd App per Domino project.
 
 ## How it works
 
 ### Workspace connection
 
-The connector is a background process that runs **inside each workspace**. It registers with the App, reads locally saved agent history, and relays the workspace's Herdr terminals. It installs Herdr as needed and attempts to update the agent CLIs once per workspace execution. For connector startup failures, see `~/.cache/domino-herdr/connector.log` in the workspace.
+The connector is a background process that runs **inside each workspace**. It registers with the App, reads locally saved agent history, and relays the workspace's Herdr terminals. It installs Herdr as needed and attempts to update the agent CLIs once per workspace execution. For connector startup failures, see `~/.cache/domino-herdr/connector.log` in the workspace. The App refreshes its workspace list every 20 seconds while its tab is visible, and when you return to the tab, so workspaces started or stopped elsewhere in Domino appear on their own.
 
 #### With Domino workspace SSH (default)
 
