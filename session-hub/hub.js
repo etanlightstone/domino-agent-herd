@@ -293,7 +293,9 @@ async function pollOtherWorkspaces() {
   await Promise.all(running.map(async workspace => {
     try {
       const list = await api(agentPath(workspace) + '?live=1');
-      otherAgents.set(workspace.id, list.running || []);
+      const agents = list.running || [];
+      otherAgents.set(workspace.id, agents);
+      if (workspace.id !== agentWorkspace?.id) refreshSplitTitles(workspace, agents);
     } catch {
       otherAgents.delete(workspace.id);
     }
@@ -370,7 +372,7 @@ function row(workspace) {
         projectsDialog.close();
         showAgents(workspace);
       }, 'primary'),
-      button('Stop', () => confirmWorkspaceAction(workspace, 'stop')));
+      button('Stop', () => confirmWorkspaceAction(workspace, 'stop'), 'danger'));
   } else if (workspace.state === 'Stopped' && !transition && !pending.has(workspace.id)) {
     const path = `projects/${workspace.projectId}/workspaces/${workspace.id}/resume`;
     controls.append(button('Resume workspace', () => runAction(path, {}), 'primary'));
@@ -447,7 +449,7 @@ function showAgents(workspace, preferred) {
   byId('agent-title').textContent = workspace.project;
   byId('workspace-name').textContent = workspace.name;
   byId('workspace-controls').replaceChildren(
-    button('Stop workspace', () => confirmWorkspaceAction(workspace, 'stop'))
+    button('Stop workspace', () => confirmWorkspaceAction(workspace, 'stop'), 'danger')
   );
   ['agent-controls', 'agent-running', 'workspace-ide'].forEach(id => byId(id).replaceChildren());
   byId('agent-view').hidden = false;
@@ -649,6 +651,7 @@ async function loadAgents(workspace) {
     if (!normalSlot.request && !byId('agent-summary').classList.contains('error')) agentNotice(list.detail || '');
     runningAgents = list.running;
     renderAgentTabs();
+    refreshSplitTitles(workspace, runningAgents);
     renderWorkspaceTabs();
     const empty = byId('agent-empty');
     empty.hidden = Boolean(normalSlot.terminal || normalSlot.request);
@@ -1114,7 +1117,6 @@ function renderTerminalSlot(slot) {
   const {terminal, request} = slot;
   if (slot === normalSlot) {
     byId('terminal-panel').hidden = !terminal;
-    byId('terminal-title').textContent = terminal?.label || '';
     return;
   }
   const item = terminal || request;
@@ -1127,6 +1129,20 @@ function renderTerminalSlot(slot) {
   slot.change.hidden = !terminal;
   slot.full.hidden = !terminal;
   slot.empty.hidden = Boolean(terminal);
+}
+
+function refreshSplitTitles(workspace, agents) {
+  if (!splitActive) return;
+  for (const slot of splitTiles) {
+    const session = slot.terminal;
+    if (!session || workspaceKey(session.workspace) !== workspaceKey(workspace)) continue;
+    const agent = agents.find(item => item.pane === session.pane);
+    const label = agent?.title || agent?.label;
+    if (label && label !== session.label) {
+      session.label = label;
+      renderTerminalSlot(slot);
+    }
+  }
 }
 
 function slotNotice(slot, message, error = false) {
@@ -1174,6 +1190,7 @@ function enterSplit() {
   splitPanel.hidden = false;
   if (current) {
     moveTerminal(current, left);
+    refreshSplitTitles(current.workspace, runningAgents);
     selectedPane = undefined;
     slotNotice(left, current.status || '');
     if (left.terminal) focusTerminal(left.terminal);
@@ -1276,7 +1293,7 @@ function confirmWorkspaceAction(workspace, action) {
     changing.set(workspace.id, deleting ? 'Deleting' : 'Stopping');
     render();
     watchWorkspaceAction(workspace, deleting);
-  }, deleting ? 'danger confirm-danger' : 'primary');
+  }, 'danger confirm-danger');
   dialogBody.replaceChildren(element('h2', `${title}?`),
     element('strong', `${workspace.project} / ${workspace.name}`), element('p', message), confirm, error);
   dialog.showModal();

@@ -15,6 +15,7 @@
 <header class="top">
   <a class="brand" href="./">Workspace Sessions</a>
   <div class="nav-right">
+    <a class="help-link" href="https://github.com/etanlightstone/domino-agent-herd#readme" target="_blank" rel="noopener noreferrer" title="Help: setup and usage guide (opens the README in a new tab)" aria-label="Help (opens the README in a new tab)">?</a>
     <button id="browse-projects" type="button">Browse projects</button>
     <button id="connector-settings" type="button">Connector setup</button>
     <button id="refresh" type="button">Refresh</button>
@@ -48,6 +49,7 @@
     <div class="agent-bar">
       <div class="agent-switcher">
         <div id="agent-running" class="agent-tabs" role="tablist" aria-label="Agent panes"></div>
+        <span class="tool-divider" aria-hidden="true"></span>
         <div id="workspace-ide"></div>
         <button id="git-sync" type="button" aria-disabled="true">
           <span id="git-icon" aria-hidden="true">↻</span> Sync Git
@@ -60,7 +62,7 @@
     <div id="agent-view">
       <div id="agent-empty" class="empty compact" hidden></div>
       <div id="terminal-panel" hidden>
-        <div class="terminal-bar"><span id="terminal-title"></span><button id="terminal-detach">Detach</button></div>
+        <div class="terminal-bar"><button id="terminal-detach">Detach</button></div>
         <div id="terminal"></div>
       </div>
     </div>
